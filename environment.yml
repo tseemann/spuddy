@@ -6,7 +6,11 @@ dependencies:
   - perl-list-moreutils
   - perl-path-tiny
   - csvtk
-  - seqjut
+  - seqkit
+  - kmc
+  - jellyfish
+  - mercat2
+  - sourmash
   - kmc
   - make
   - bats-core
