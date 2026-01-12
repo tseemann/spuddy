@@ -1,0 +1,2 @@
+# spuddy
+Species detection buddy
