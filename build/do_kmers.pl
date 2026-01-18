@@ -5,7 +5,6 @@ use Path::Tiny;
 use Data::Dumper;
 
 my $GTDB = "/home/shared/db/gtdb/r226/gtdb_genomes_r226";
-my $PREFIX = "ALL";
 my $KMER = shift(@ARGV) // 7;
 my $STEP = shift(@ARGV) // 3;
 my $MAXSAMP = shift(@ARGV) // 1E11; # for testing
@@ -20,11 +19,13 @@ say "CSVTK_THREAD=3";
 say "SEQKIT_THREADS=3";
 say "LC_ALL=C"; 
 
-my $name = "kmers.${KMER}_${STEP}";
-my $FOFN = "$PREFIX.$name.fofn";
+my $name = "kmers.$KMER-$STEP-$MAXSAMP";
+my $FOFN = "$name.fofn";
 say "rm -f $FOFN";
 
-fsorfor my $g (sort(path("groups.txt")->lines({chomp=>1}))) 
+my @kfile;
+
+for my $g (sort(path("groups.txt")->lines({chomp=>1}))) {
   my @kmers;
   say "mkdir -p $g";
   my $fofn = "$g/$name.fofn";
@@ -39,6 +40,7 @@ fsorfor my $g (sort(path("groups.txt")->lines({chomp=>1})))
   }
 
   my $kmers = "$g/$name";  
+  push @kfile, $kmers;
   say "echo $kmers >> $FOFN";
   # --sort-by-key so we can do merge sort later
   defer(clean("
@@ -57,21 +59,19 @@ say clean("
   tr '\\n' '\\0' < $FOFN
   | LC_ALL=C sort --merge --files0-from=-
   | uniq -u
-  > $PREFIX.$name.uniq
+  > $name.uniq
 ");
-#say clean("
-#  xargs -a $FOFN cat 
-#  | tsvtk cut -H -f 1
-#  | tsvtk freq -H -n -r 
-#  | tee $PREFIX.$name.freq
-#  | tsvtk filter2 -H -f '\$2 == 1'
-#  | cut -f 1
-#  > $PREFIX.$name.uniq
-#");
 
-#  | grep \$'\\t1\$' $PREFIX.$name.freq | cut -f 1 > $PREFIX.$name.uniq";
+say "vmtouch -t $name.uniq";
 
-say STDERR "Run: parallel -j 64 -v -k -a $PREFIX.${KMER}_$STEP.sh";
+foreach (@kfile) {
+  say clean("
+    LC_ALL=C grep -v -F -f $name.uniq $_.freq
+    | tsvtk sort -k 3:nr -o $_.uniq
+  ");
+}
+
+say STDERR "Run: parallel -j 100 -v -k -a ${KMER}-$STEP-$MAXSAMP.sh";
 
 exit(0);
 
