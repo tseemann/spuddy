@@ -4,93 +4,126 @@ use strict;
 use Path::Tiny;
 use Data::Dumper;
 
+my $GZIP = "libdeflate-gzip";
+
 my $GTDB = "/home/shared/db/gtdb/r226/gtdb_genomes_r226";
-my $KMER = shift(@ARGV) // 7;
-my $STEP = shift(@ARGV) // 3;
-my $MAXSAMP = shift(@ARGV) // 1E11; # for testing
+my $KMER = shift(@ARGV) // 6;
+my $STEP = shift(@ARGV) // 1;
+my $MAXSAMP = shift(@ARGV) // 9999991; # for testing
 my $MIN_FRAC = 0;
 my @DEFER = (); # run at end
 
 say STDERR "Generating: K=$KMER S=$STEP N=$MAXSAMP";
+my $name = "kmers.$KMER.$STEP.$MAXSAMP";
+say STDERR "Prefix = $name";
+
+open my $OUT, '>', "$name.sh";
+select $OUT;
 
 #say "set -uex -o pipefail"; ## won't push through
+say "#/usr/bin/env bash";
 say "set -ux";
-say "CSVTK_THREAD=3";
-say "SEQKIT_THREADS=3";
+say "CSVTK_THREADS=1";
+say "SEQKIT_THREADS=1";
 say "LC_ALL=C"; 
+say "CPUS=\$(( \$(nproc) / 2))";
 
-my $name = "kmers.$KMER-$STEP-$MAXSAMP";
 my $FOFN = "$name.fofn";
 say "rm -f $FOFN";
 
 my @kfile;
+my $PARA = "parallel -j \$CPUS -v";
+my $G = 'groups.txt';
+say "xargs -a $G mkdir -p";
+my @G = sort(path($G)->lines({chomp=>1}));
 
-for my $g (sort(path("groups.txt")->lines({chomp=>1}))) {
-  my @kmers;
-  say "mkdir -p $g";
-  my $fofn = "$g/$name.fofn";
-  say "rm -f $fofn"; 
+my @faa;
+#my @uniq;
+my @gcmd;
+for my $g (@G) {
+  say STDERR "Prepping: $g";
   my $N=0;
   for my $a ( path("$GTDB/$g/proteomes.txt")->lines({chomp=>1}) ) {
-    my $out = "$g/$a.$name.gz";
-    say kmers("$GTDB/$g/$a", $out);
-    say "echo $out >> $fofn";
-    $N++;
-    last if $N >= $MAXSAMP;
+    push @faa, "$g/$a";
+    last if ++$N >= $MAXSAMP;
   }
-
-  my $kmers = "$g/$name";  
-  push @kfile, $kmers;
-  say "echo $kmers >> $FOFN";
-  # --sort-by-key so we can do merge sort later
-  defer(clean("
-    xargs -a $fofn zcat
-    | tsvtk freq -H --sort-by-key
-    | tsvtk mutate2 -H --at 2
-      -w 6 -e '\$2 / $N'
-    | tee $kmers.freq
-    | cut -f 1 > $kmers
-  "));
+  my $cmd = species_pepmer($g,$name,$N);
+  #push @uniq, "$g/$name";
+  push @gcmd, $cmd;
 }
+my $faa_fofn = path("$name.faa.fofn");
+$faa_fofn->spew(map { "$_\n" } @faa);
+say "$PARA -a $faa_fofn ".dq(faa2pep());
 
-say $_ for @DEFER;
+# count uniq kmers per isolate
+my $gcmd = path("$name.gcmd");
+$gcmd->spew(map { "$_\n" } @gcmd);
+say "$PARA -a $gcmd";
 
+# compile all the uniqmers
 say clean("
-  tr '\\n' '\\0' < $FOFN
+  time xargs -a $G -I % echo %/$name 
+  | tr '\\n' '\\0'
   | LC_ALL=C sort --merge --files0-from=-
+  | pv -l
+  | uniq -u
+  > $name.uniq
+");
+
+# remove non-species-speciic kmers
+#say clean("
+#  time xargs -a $G -I % cat %/$name 
+#  | pv -l
+#  | tsvtk uniq -H -j 8 -o $name.uniq
+#");
+say clean("
+  time xargs -a $G -I % echo %/$name 
+  | tr '\\n' '\\0'
+  | LC_ALL=C sort --merge --files0-from=-
+  | pv -l
   | uniq -u
   > $name.uniq
 ");
 
 say "vmtouch -t $name.uniq";
 
-foreach (@kfile) {
-  say clean("
-    LC_ALL=C grep -v -F -f $name.uniq $_.freq
-    | tsvtk sort -k 3:nr -o $_.uniq
-  ");
-}
+say "paralel -j 8 -a $G ".dq(clean("
+    LC_ALL=C grep -v -F -f $name.uniq {}/$name
+    | tsvtk sort -k 3:nr -o {}/$name.freq.uniq
+  "));
 
-say STDERR "Run: parallel -j 100 -v -k -a ${KMER}-$STEP-$MAXSAMP.sh";
-
+# finish up
+say STDERR "Run bash -x $name.sh";
 exit(0);
 
 #...........................................
-sub defer {
-  push @DEFER, @_;
+sub species_pepmer {
+  my($dir,$name,$num) = @_;
+  return clean("
+    xargs -a $GTDB/$dir/proteomes.txt 
+          -I % cat $dir/%.$name
+    | tsvtk freq -H --sort-by-key
+    | tsvtk mutate2 -H --at 2
+            -w 6 -e '\$2 / $num'
+    | tee $dir/$name.freq
+    | cut -f 1 > $dir/$name
+  ");
 }
 #...........................................
-sub kmers {
-  my($in,$out) = @_;
+sub dq { 
+  $_ = shift;
+  s/"/\\"/g;
+  return qq/"$_"/;
+}
+#...........................................
+sub faa2pep {
   return clean("
-    zcat $in 
-    | tantan -p -x X
-    | seqkit sliding -W $KMER  -s $STEP
-                     --quiet -t protein
-    | seqkit seq -w 0 -u --seq 
-                 --quiet -t protein
-    | grep -v '[*XUOW]'
-    | tsvtk uniq -H -o $out
+    $GZIP -dc $GTDB/{}
+    | tantan -p
+    | seqkit sliding -w 0 -W $KMER -s $STEP
+    | grep -v '^>' 
+    | grep -v '[a-zXUOW*]'
+    | tsvtk uniq -H -o {}.$name
   ");
 }
 #...........................................
