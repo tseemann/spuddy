@@ -22,14 +22,11 @@ select $OUT;
 
 #say "set -uex -o pipefail"; ## won't push through
 say "#/usr/bin/env bash";
-say "set -ux";
+say "set -eux -o pipefail";
 say "CSVTK_THREADS=1";
 say "SEQKIT_THREADS=1";
 say "LC_ALL=C"; 
 say "CPUS=\$(( \$(nproc) / 2))";
-
-my $FOFN = "$name.fofn";
-say "rm -f $FOFN";
 
 my @kfile;
 my $PARA = "parallel -j \$CPUS -v";
@@ -42,14 +39,20 @@ my @faa;
 my @gcmd;
 for my $g (@G) {
   say STDERR "Prepping: $g";
+  my @kmerf;
   my $N=0;
   for my $a ( path("$GTDB/$g/proteomes.txt")->lines({chomp=>1}) ) {
     push @faa, "$g/$a";
+    push @kmerf, "$a.$name";
     last if ++$N >= $MAXSAMP;
   }
   my $cmd = species_pepmer($g,$name,$N);
   #push @uniq, "$g/$name";
   push @gcmd, $cmd;
+  
+  # keep track of subset of files we kmered
+  my $kmerf = path("$g/$name.counts.fofn");
+  $kmerf->spew(map { "$_\n" } @kmerf);
 }
 my $faa_fofn = path("$name.faa.fofn");
 $faa_fofn->spew(map { "$_\n" } @faa);
@@ -62,46 +65,32 @@ say "$PARA -a $gcmd";
 
 # compile all the uniqmers
 say clean("
-  time xargs -a $G -I % echo %/$name 
+  xargs -a $G -I % echo %/$name 
   | tr '\\n' '\\0'
   | LC_ALL=C sort --merge --files0-from=-
-  | pv -l
   | uniq -u
   > $name.uniq
 ");
 
-# remove non-species-speciic kmers
-#say clean("
-#  time xargs -a $G -I % cat %/$name 
-#  | pv -l
-#  | tsvtk uniq -H -j 8 -o $name.uniq
-#");
-say clean("
-  time xargs -a $G -I % echo %/$name 
-  | tr '\\n' '\\0'
-  | LC_ALL=C sort --merge --files0-from=-
-  | pv -l
-  | uniq -u
-  > $name.uniq
-");
-
+# For each species, find their species-specific ones
 say "vmtouch -t $name.uniq";
-
-say "paralel -j 8 -a $G ".dq(clean("
-    LC_ALL=C grep -v -F -f $name.uniq {}/$name
-    | tsvtk sort -k 3:nr -o {}/$name.freq.uniq
+say "parallel -j 8 -a $G ".dq(clean("
+    LC_ALL=C grep -F -f $name.uniq {}/$name.freq
+    | tsvtk sort -H -k 3:nr -o {}/$name.freq.uniq
   "));
 
+# collate stats of uniqmers for each species
+say "parallel -a $G 'wc -l {}/$name.freq.uniq' > $name.counts";
+
 # finish up
-say STDERR "Run bash -x $name.sh";
+say STDERR "Run this!\n  bash -x $name.sh";
 exit(0);
 
 #...........................................
 sub species_pepmer {
   my($dir,$name,$num) = @_;
   return clean("
-    xargs -a $GTDB/$dir/proteomes.txt 
-          -I % cat $dir/%.$name
+    xargs -a $dir/$name.counts.fofn -I % cat $dir/%
     | tsvtk freq -H --sort-by-key
     | tsvtk mutate2 -H --at 2
             -w 6 -e '\$2 / $num'
@@ -118,6 +107,7 @@ sub dq {
 #...........................................
 sub faa2pep {
   return clean("
+    [[ -f '{}.$name' ]] ||
     $GZIP -dc $GTDB/{}
     | tantan -p
     | seqkit sliding -w 0 -W $KMER -s $STEP
