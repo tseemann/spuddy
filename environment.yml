@@ -5,12 +5,16 @@ dependencies:
   - perl >=5.32
   - perl-list-moreutils
   - perl-path-tiny
+  - perl-file-which
+  - perl-json
+  - libdeflate
+  - vmtouch
+  - unzip
   - csvtk
   - seqkit
-  - kmc
-  - jellyfish
-  - mercat2
+  - orfm
+  - tantan
   - sourmash
-  - kmc
+  - jq
   - make
   - bats-core
