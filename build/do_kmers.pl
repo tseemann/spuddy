@@ -126,7 +126,9 @@ say clean("
 
 # generate cut down versions
 say "$CACHE $name.db";
-say qq{echo -e "50\\n75\\n90\\n95\\n" | $PARAJ -v "tsvtk filter2 -H -f '\\\$2 >= 0.{}' $name.db > $name.db.{}pc"};
+#say qq{echo -e "50\\n75\\n90\\n95\\n" | $PARAJ -v "tsvtk filter2 -H -f '\\\$2 >= 0.{}' $name.db > $name.db.{}pc"};
+#say qq{echo -e "50\\n75\\n90\\n95" | $PARAJ -v "awk -F\$'\\t' '\$2 >= 0.{}' $name.dbb > $name.db.{}pc"};
+say qq/echo -e "50\\n75\\n90\\n95" | $PARAJ -v "awk '\\\$2 >= 0.{}' $name.db > $name.db.{}pc"/;
 say "wc -l $name.db*";
 say "\\ls -1sh $name.db*";
 
