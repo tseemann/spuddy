@@ -11,15 +11,19 @@ use JSON;
 use Path::Tiny;
 
 #......................................................................................
-my $VERSION = "0.0.3";
+my $VERSION = "0.1.0";
 my $EXE = basename($0);
 my $URL = 'https://github.com/tseemann/spuddy';
 
 my %opt = (
-  'D' => 'kmers.7.1.50.db.90pc',
+  'D' => 'kmers.7.1.50.db.95pc',
   'T' => 11,
   'L' => 300,
   'K' => '/dev/null',
+  'O' => '/dev/null',
+  'o' => '/dev/stdout',
+  'j' => 1,
+  'R' => 8,
 );
 #......................................................................................
 sub usage {
@@ -34,11 +38,19 @@ sub usage {
     "  -v       Print version and exit\n",
     "  -C       Show citation and exit\n",
     "  -q       No output while running, only errors\n",
+    "  -d       Output debug information\n",
     "SETTINGS\n",
     "  -D FILE  Database file [$opt{D}]\n",
     "  -T CODE  Genetic code [$opt{T}]\n",
     "  -L LEN   Minimum ORF length [$opt{L}]\n",
+    "  -m       Metagenome mode\n",
+    "OUTPUTS\n",
+    "  -o FILE  Species prediction result [$opt{o}]\n",
+    "  -O FILE  Save raw result file [$opt{O}]\n",
     "  -K FILE  Save kmers to this file [$opt{K}]\n",
+    "SPEED\n",
+    "  -j CPUS  Threads to use [$opt{j}]\n",
+    "  -R RAM   Keep RAM usage below [$opt{R}] GB\n",
     "HOMEPAGE\n  $URL\n",
     "END\n";
   exit($errcode);
@@ -48,37 +60,57 @@ sub msg { print STDERR "@_\n" unless $opt{'q'}; }
 sub wrn { msg("WARNING:", @_); }
 sub err { print STDERR "ERROR: @_\n"; exit(-1); }
 #......................................................................................
-getopts('vhqCT:D:L:', \%opt) or exit(-1);
+getopts('vhqCdmMT:D:L:K:j:R:O:o:', \%opt) or exit(-1);
 $opt{'v'} and version();
 $opt{'C'} and citation();
 $opt{'h'} and usage(0);
+$opt{'M'} and motd(42);
+
 @ARGV or usage(1);
 
-is_int($opt{'T'}, "-T", 1, 36);
-is_int($opt{'L'}, "-L", 180, 999);
+is_int($opt{'T'}, "-T", 1, 33);
+is_int($opt{'L'}, "-L", 3, 999);
+is_int($opt{'j'}, "-j", 1, 512); # need cpus()
+is_int($opt{'R'}, "-R", 1, 4096); # need ram()
+$opt{'L'} % 3 == 0 or err("-L must a multople of 3");
 is_file($opt{'D'}, "-D");
-
 #......................................................................................
 msg("This is $EXE $VERSION");
 
+my $infile = shift @ARGV;
+is_file($infile, "Input");
+if (-s $infile < 20_000_000) {
+  msg("Treating file as an assembly");
+  $opt{L} = 300 if $opt{L} < 300;
+}
+else {
+  msg("Treating file as as reads");
+  # need to tailor to read length?
+  $opt{L} = 99 if $opt{L} > 150;
+}
+my $metag = $opt{'m'} ? '| LC_ALL=C uniq' : '';
+$opt{'m'} and msg("Enabled -m metagenome mode");
 my $outfile = Path::Tiny->tempfile();
 
 my $cmd = qq/
-   orfm -c $opt{T} -s -m $opt{L} @ARGV
- |  seqkit sliding -w 0 -W 7 -s 1
+ orfm -c $opt{T} -s -m $opt{L} \Q$infile\E
+ | seqkit sliding -w 0 -W 7 -s 1
  | grep -Ev '^>|[XUOW*]'
- | LC_ALL=C sort
- | tee out.kmers
+ | LC_ALL=C sort --parallel=$opt{j} -S $opt{R}G
+ $metag
+ | tee \Q$opt{K}\E
  | LC_ALL=C join -t \$'\\t' -j 1 - $opt{D}
  > $outfile
 /;
 $cmd =~ s/\s+/ /xmsg;
-msg("Running: $cmd");
+msg("Running: $cmd") if $opt{d};
 msg("Scannubg: $opt{D}");
-system($cmd)==0 or die $!;
+system($cmd)==0 or err($!);
+$outfile->copy($opt{'O'});
+
 my %score;
 my %match;
-foreach ($outfile->lines({chomp=>1})) {
+foreach (path($outfile)->lines({chomp=>1})) {
   # LYKYKVA 0.945946 105 Bacteria/Coprococcus/acet
   my(undef,$p,$n,$gs) = split m/\t/;
   $score{$gs} += $p;
@@ -86,22 +118,28 @@ foreach ($outfile->lines({chomp=>1})) {
 }
 my $sum_score = sum(values %score);
 my $sum_match = sum(values %match);
+
+my $out_fh = path($opt{'o'})->filehandle('>');
+select $out_fh;
+
+my $row=0;
 for my $gs (sort { $score{$b} <=> $score{$a} } keys %score) {
   next if $match{$gs} <= 1;
+  my $s_pc = $score{$gs}*100/$sum_score,;
+  my $m_pc = $match{$gs}*100/$sum_match;
   printf "%6.2f%% %6.2f%% %5d %s\n",
-    $score{$gs}*100/$sum_score,
-    $match{$gs}*100/$sum_match,
-    $match{$gs},
-    $gs;
+    $s_pc, $m_pc, $match{$gs}, $gs;
+  $row++==0 and msg("Top prediction is $gs ($s_pc%)");
+  
 }
-
+msg( motd() );
 msg("Done.");
 exit(0);
 
 #......................................................................................
 sub is_file {
   my($fname, $name) = @_;
-  -r $fname or err("-D $fname is not a valid file") ;
+  -r $fname or err("$name '$fname' is not a valid file") ;
 } 
 #......................................................................................
 sub is_int {
@@ -120,20 +158,28 @@ sub citation {
   exit(0);
 }
 #......................................................................................
-sub load_fasta {
-  my($fh) = @_;
-  my @seq;
-  while (<$fh>) {
-    chomp;
-    if (m/^\s*>(\S+)/) {
-      push @seq, [ $1, '' ];
-    }
-    else {
-      @seq or err("Error parsing FASTA");
-      $seq[-1]->[1] .= uc($_);
-    }
-  }
-  msg("Loaded", 0+@seq, "sequences.");
-  return \@seq;
+sub motd {
+  my @motd = (
+    "Maybe a potato can beat a fearsome octopus?",
+    "A 'spud' is a nickname for a potato",
+    "Potato is more versatile than baked goods",
+    "Potato, rice, or pasta - choose your starch weapon!",
+    "The German word for potato is 'Karoffel'",
+    "Unleash the potatoes!",
+    "Does gnocchi really count as pasta?",
+    "Check out the docs at $URL",
+    "Not happy with $EXE ? Tell me at $URL/issues",
+    "Spuddy is your best buddy when it comes to bacterial ID",
+    "Sylph is also a good tool! https://github.com/bluenote-1577/sylph",
+    "Kraken is where it all began: https://github.com/DerrickWood/kraken2",
+    "Put another spud on the barbie!",
+    "I wouldn't put good money on $EXE\'s prediction",
+    "My gaming PC is sad potato...",
+    "True Irish people eat potatoes three ways at every meal",
+    "Germanic potato salad is one of my favourite foods",    
+  );
+  if ($_[0]) { say "* $_" for @motd; exit(0); }
+  return $motd[ int(rand(@motd)) ];
 }
 #......................................................................................
+

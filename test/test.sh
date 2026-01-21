@@ -17,7 +17,7 @@ setup () {
 }
 @test "Help" {
   run -0 $exe -h
-  [[ "$output" =~ "peptide" ]]
+  [[ "$output" =~ "species" ]]
 }
 @test "Ciiation" {
   run -0 $exe -C
@@ -27,7 +27,11 @@ setup () {
   run ! $exe
 }
 @test "Bad option" {
-  run ! $exe --doesnotexist
+  run ! $exe -Q
+}
+@test "Secret MOTD dump" {
+  run $exe -M
+  [[ "$output" =~ "potato" ]]
 }
 #@test "Null input" {
 #  run ! $exe /dev/null
