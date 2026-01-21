@@ -4,7 +4,6 @@ use strict;
 use Path::Tiny;
 use Data::Dumper;
 
-my $GZIP = "libdeflate-gzip";
 my $COMPRESS = "pigz -p \$CPUS";
 my $ZCAT = "libdeflate-gzip -d -c -f";
 my $CACHE = "vmtouch -q -t";
@@ -34,7 +33,8 @@ say "CPUS=\$(( \$(nproc) / 2))";
 
 my $LOGFILE = "$name.sh.log";
 say "rm -f $LOGFILE";
-my $PARA = "parallel --bar --joblog $LOGFILE";
+# The + means append to the log file
+my $PARA = "parallel -k --bar --joblog +$LOGFILE";
 my $PARAJ = "$PARA -j \$CPUS";
 my $G = 'groups.txt';
 
@@ -77,11 +77,14 @@ say "$PARAJ -a $gcmd";
 # compile all the uniqmers
 banner("Identifying global singleton kmers (slow)");
 say "$PARA -j 1 -a $G $CACHE {}/$name";
+my $NG = scalar(@G)+1;
 say clean("
   [[ -r '$name.uniq' ]] ||
   xargs -a $G -I % echo %/$name 
   | tr '\\n' '\\0'
   | LC_ALL=C sort --merge --files0-from=-
+                  --batch-size=$NG
+                  --parallel=\$CPUS
   | uniq -u
   > $name.uniq
 ");
@@ -101,8 +104,8 @@ banner("Add scores to species-specific kmers");
 say "$PARAJ -a $G ".dq(clean("
        tsvtk join -H --left-join
              {}/$name.uniq {}/$name.freq
-     | tsvtk sort -H -k 2:nr
-              -o {}/$name.uniq.freq
+    |  tsvtk mutate2 -H -e \\'{}\\'
+             -o {}/$name.anno
     "));
 
 # collate stats of uniqmers for each species
@@ -111,11 +114,15 @@ say "$PARAJ -a $G 'wc -l {}/$name.uniq' | sort -bnr > $name.counts";
 
 # collate all the species kmers/socre
 banner("Make final databases");
-say "$PARAJ -a $G ".dq(clean("
-       tsvtk mutate2 -H -e \\'{}\\'
-             {}/$name.uniq.freq
-    "))." > $name.db";
-#    "))." | $COMPRESS > $name.db.gz";
+# the -k is important here to ensure it remians sorted?
+say clean("
+  xargs -a $G -I % echo %/$name.anno
+  | tr '\\n' '\\0'
+  | LC_ALL=C sort --merge --files0-from=-
+                  --batch-size=$NG
+                  -k 1.1,1.$KMER
+                  -o $name.db
+");
 
 # generate cut down versions
 say "$CACHE $name.db";
@@ -140,7 +147,7 @@ sub species_pepmer {
     xargs -a $dir/$name.list.fofn -I % $ZCAT $dir/%
     | tsvtk freq -H --sort-by-key
     | tsvtk mutate2 -H --at 2
-            -w 6 -e '\$2 / $num'
+            -w 5 -e '\$2 / $num'
     | tee $dir/$name.freq
     | cut -f 1 
     > $outname
