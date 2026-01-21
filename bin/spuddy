@@ -2,14 +2,16 @@
 use 5.32.0;
 use strict;
 use warnings;
-use List::Util qw(min max);
+use List::Util qw(min max sum);
 use Getopt::Std;
 use File::Basename;
 use IO::Uncompress::AnyUncompress qw(anyuncompress $AnyUncompressError);
 use Data::Dumper;
+use JSON;
+use Path::Tiny;
 
 #......................................................................................
-my $VERSION = "0.0.1";
+my $VERSION = "0.0.2";
 my $EXE = basename($0);
 my $URL = 'https://github.com/tseemann/spuddy';
 #......................................................................................
@@ -51,9 +53,66 @@ $opt{'v'} and version();
 $opt{'C'} and citation();
 $opt{'h'} and usage(0);
 @ARGV or usage(1);
+
 #......................................................................................
+
 msg("This is $EXE $VERSION");
-msg("Nothing was done.");
+
+my $dbfile = "kmers.7.1.50.db.95pc";
+my $outfile = "$EXE.out";
+my $cmd = qq/
+   orfm -c 11 -s -m 300 @ARGV
+ |  seqkit sliding -w 0 -W 7 -s 1
+ | grep -Ev '^>|[XUOW*]'
+ | LC_ALL=C sort
+ | tee out.kmers
+ | LC_ALL=C join -t \$'\\t' -j 1 - $dbfile
+ > $outfile
+/;
+$cmd =~ s/\s+/ /xmsg;
+msg("Running: $cmd");
+msg("Scabbubg: $dbfile");
+system($cmd)==0 or die $!;
+my %score;
+my %match;
+foreach (path($outfile)->lines({chomp=>1})) {
+  # LYKYKVA 0.945946 105 Bacteria/Coprococcus/acet
+  my(undef,$p,$n,$gs) = split m/\t/;
+  $score{$gs} += $p;
+  $match{$gs} ++;
+}
+my $sum_score = sum(values %score);
+my $sum_match = sum(values %match);
+for my $gs (sort { $score{$b} <=> $score{$a} } keys %score) {
+  next if $match{$gs} <= 1;
+  printf "%6.2f%% %6.2f%% %5d %s\n",
+    $score{$gs}*100/$sum_score,
+    $match{$gs}*100/$sum_match,
+    $match{$gs},
+    $gs;
+}
+
+#msg("Output: $outfile");
+#my %kmer;
+#my $N = 0;
+#map { $N++ ; $kmer{$_}++ } qx/$cmd/;
+#msg("Loaded",scalar(keys %kmer),"distinct kmers from $N");
+
+
+if (0) {
+my $dbfile = '/home/tseemann/git/spuddy/build/kmers.7.1.50.db.95pc';
+msg("LOADING: $dbfile");
+open DB, '<', $dbfile or die $!;
+my %hit;
+while (<DB>) {
+  chomp;
+  my($kmer,@val) = split m/\t/;
+  $hit{$kmer} = \@val;
+}
+#my $dbdata = path($dbfile)->slurp;
+#my $db = decode_json $dbdata;
+#print Dumper($db);
+}
 msg("Done.");
 exit(0);
 
