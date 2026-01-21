@@ -16,7 +16,7 @@ my $EXE = basename($0);
 my $URL = 'https://github.com/tseemann/spuddy';
 
 my %opt = (
-  'D' => 'kmers.7.1.50.db.95pc',
+  'D' => 'kmers.7.1.50.db.50pc',
   'T' => 11,
   'L' => 300,
   'K' => '/dev/null',
@@ -24,6 +24,7 @@ my %opt = (
   'o' => '/dev/stdout',
   'j' => 1,
   'R' => 8,
+  'p' => '0.50',
 );
 #......................................................................................
 sub usage {
@@ -45,6 +46,7 @@ sub usage {
     "  -L LEN   Minimum ORF length [$opt{L}]\n",
     "  -m       Metagenome mode\n",
     "OUTPUTS\n",
+    "  -p n.nn  Threshold for reporting [$opt{p}]\n",
     "  -o FILE  Species prediction result [$opt{o}]\n",
     "  -O FILE  Save raw result file [$opt{O}]\n",
     "  -K FILE  Save kmers to this file [$opt{K}]\n",
@@ -60,7 +62,8 @@ sub msg { print STDERR "@_\n" unless $opt{'q'}; }
 sub wrn { msg("WARNING:", @_); }
 sub err { print STDERR "ERROR: @_\n"; exit(-1); }
 #......................................................................................
-getopts('vhqCdmMT:D:L:K:j:R:O:o:', \%opt) or exit(-1);
+getopts('vhqCdmMT:D:L:K:j:R:O:o:p:', \%opt) or exit(-1);
+
 $opt{'v'} and version();
 $opt{'C'} and citation();
 $opt{'h'} and usage(0);
@@ -74,6 +77,7 @@ is_int($opt{'j'}, "-j", 1, 512); # need cpus()
 is_int($opt{'R'}, "-R", 1, 4096); # need ram()
 $opt{'L'} % 3 == 0 or err("-L must a multople of 3");
 is_file($opt{'D'}, "-D");
+is_float($opt{'p'}, "-p", 0, 1);
 #......................................................................................
 msg("This is $EXE $VERSION");
 
@@ -81,14 +85,14 @@ my $infile = shift @ARGV;
 is_file($infile, "Input");
 if (-s $infile < 20_000_000) {
   msg("Treating file as an assembly");
-  $opt{L} = 300 if $opt{L} < 300;
+  $opt{'L'} = 300 if $opt{L} < 300;
 }
 else {
   msg("Treating file as as reads");
   # need to tailor to read length?
-  $opt{L} = 99 if $opt{L} > 150;
+  $opt{'L'} = 99 if $opt{L} > 150;
 }
-my $metag = $opt{'m'} ? '| LC_ALL=C uniq' : '';
+my $metag = $opt{'m'} ? '' : '| LC_ALL=C uniq';
 $opt{'m'} and msg("Enabled -m metagenome mode");
 my $outfile = Path::Tiny->tempfile();
 
@@ -96,16 +100,17 @@ my $cmd = qq/
  orfm -c $opt{T} -s -m $opt{L} \Q$infile\E
  | seqkit sliding -w 0 -W 7 -s 1
  | grep -Ev '^>|[XUOW*]'
+ | pv -l
  | LC_ALL=C sort --parallel=$opt{j} -S $opt{R}G
  $metag
  | tee \Q$opt{K}\E
- | LC_ALL=C join -t \$'\\t' -j 1 - $opt{D}
+ | LC_ALL=C join -t \$'\\t' -j 1 - <(cat $opt{D})
  > $outfile
 /;
 $cmd =~ s/\s+/ /xmsg;
 msg("Running: $cmd") if $opt{d};
-msg("Scannubg: $opt{D}");
-system($cmd)==0 or err($!);
+msg("Scanning $infile against $opt{D}");
+system('bash', '-c', $cmd)==0 or err($!);
 $outfile->copy($opt{'O'});
 
 my %score;
@@ -126,13 +131,15 @@ my $row=0;
 for my $gs (sort { $score{$b} <=> $score{$a} } keys %score) {
   next if $match{$gs} <= 1;
   my $s_pc = $score{$gs}*100/$sum_score,;
+  last if $s_pc < $opt{'p'};
   my $m_pc = $match{$gs}*100/$sum_match;
-  printf "%6.2f%% %6.2f%% %5d %s\n",
+  # actual outpuit results
+  printf "%6.2f%%\t%6.2f%%\t%5d\t%s\n",
     $s_pc, $m_pc, $match{$gs}, $gs;
   $row++==0 and msg("Top prediction is $gs ($s_pc%)");
   
 }
-msg( motd() );
+msg( motd(0) );
 msg("Done.");
 exit(0);
 
@@ -146,6 +153,12 @@ sub is_int {
   my($s, $name, $min, $max) = @_;
   $s =~ m/^[-+]?\d+$/ && $s >= $min && $s <= $max
     or err("$name must be an integer between $min and $max");
+} 
+#......................................................................................
+sub is_float {
+  my($s, $name, $min, $max) = @_;
+  $s =~ m/^[-+]?\d+(\.\d+)?$/ && $s >= $min && $s <= $max
+    or err("$name must be a number between $min and $max");
 } 
 #......................................................................................
 sub version { 
