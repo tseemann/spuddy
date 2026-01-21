@@ -2,21 +2,20 @@
 use 5.32.0;
 use strict;
 use warnings;
-use List::Util qw(min max sum);
-use Getopt::Std;
-use File::Basename;
-use IO::Uncompress::AnyUncompress qw(anyuncompress $AnyUncompressError);
-use Data::Dumper;
-use JSON;
 use Path::Tiny;
+use Getopt::Std;
+use File::Which;
+use Data::Dumper;
+use List::Util qw(min max sum);
+use FindBin;
 
 #......................................................................................
-my $VERSION = "0.1.0";
-my $EXE = basename($0);
+my $VERSION = "0.2.0";
+my $EXE = path($0)->basename;
 my $URL = 'https://github.com/tseemann/spuddy';
 
 my %opt = (
-  'D' => 'kmers.7.1.50.db.50pc',
+  'D' => 'kmers.7.1.50.db.95pc',
   'T' => 11,
   'L' => 300,
   'K' => '/dev/null',
@@ -80,6 +79,9 @@ is_file($opt{'D'}, "-D");
 is_float($opt{'p'}, "-p", 0, 1);
 #......................................................................................
 msg("This is $EXE $VERSION");
+need_exe($_) for qw"
+  orfm seqkit xzcat grep paste join tee
+";
 
 my $infile = shift @ARGV;
 is_file($infile, "Input");
@@ -104,7 +106,8 @@ my $cmd = qq/
  | LC_ALL=C sort --parallel=$opt{j} -S $opt{R}G
  $metag
  | tee \Q$opt{K}\E
- | LC_ALL=C join -t \$'\\t' -j 1 - <(cat $opt{D})
+ | LC_ALL=C join -t \$'\\t' -j 1 
+            - <(xzcat $opt{D})
  > $outfile
 /;
 $cmd =~ s/\s+/ /xmsg;
@@ -160,6 +163,13 @@ sub is_float {
   $s =~ m/^[-+]?\d+(\.\d+)?$/ && $s >= $min && $s <= $max
     or err("$name must be a number between $min and $max");
 } 
+#......................................................................................
+sub need_exe {
+  my($exe) = @_;
+  my $p = which($exe) 
+    or err("Please install '$exe'");
+  msg("Found: $exe => $p");
+}
 #......................................................................................
 sub version { 
   say "$EXE $VERSION"; 

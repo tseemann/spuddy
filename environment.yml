@@ -3,10 +3,8 @@ channels:
   - bioconda
 dependencies:
   - perl >=5.32
-  - perl-list-moreutils
   - perl-path-tiny
   - perl-file-which
-  - perl-json
   - libdeflate
   - vmtouch
   - unzip
@@ -14,7 +12,5 @@ dependencies:
   - seqkit
   - orfm
   - tantan
-  - sourmash
-  - jq
   - make
   - bats-core
