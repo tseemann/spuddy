@@ -10,14 +10,15 @@ use List::Util qw(min max sum);
 use FindBin;
 
 #......................................................................................
-my $VERSION = "0.2.0";
+my $VERSION = "0.3.0";
 my $EXE = path($0)->basename;
 my $URL = 'https://github.com/tseemann/spuddy';
 
 my %opt = (
-  'D' => 'kmers.7.1.50.db.95pc',
+#  'D' => 'kmers.7.1.50.db.95pc',
+  'D' => 'kmers.8.1.10.db.95pc.zst',
   'T' => 11,
-  'L' => 300,
+  'L' => 100,
   'K' => '/dev/null',
   'O' => '/dev/null',
   'o' => '/dev/stdout',
@@ -42,7 +43,7 @@ sub usage {
     "SETTINGS\n",
     "  -D FILE  Database file [$opt{D}]\n",
     "  -T CODE  Genetic code [$opt{T}]\n",
-    "  -L LEN   Minimum ORF length [$opt{L}]\n",
+    "  -L LEN   Minimum protein length [$opt{L}]\n",
     "  -m       Metagenome mode\n",
     "OUTPUTS\n",
     "  -p n.nn  Threshold for reporting [$opt{p}]\n",
@@ -71,48 +72,59 @@ $opt{'M'} and motd(42);
 @ARGV or usage(1);
 
 is_int($opt{'T'}, "-T", 1, 33);
-is_int($opt{'L'}, "-L", 3, 999);
+is_int($opt{'L'}, "-L", 30, 999);
 is_int($opt{'j'}, "-j", 1, 512); # need cpus()
 is_int($opt{'R'}, "-R", 1, 4096); # need ram()
-$opt{'L'} % 3 == 0 or err("-L must a multople of 3");
 is_file($opt{'D'}, "-D");
 is_float($opt{'p'}, "-p", 0, 1);
 #......................................................................................
 msg("This is $EXE $VERSION");
-need_exe($_) for qw"
-  orfm seqkit xzcat grep paste join tee
-";
+need_exe($_) for qw(
+  orfm pyrogial seqkit tsvtk zstd);
+
+# guess kmer size from DB name
+$opt{'D'} =~ m/(\d+)/;
+my $KMER = $1 // 7;
 
 my $infile = shift @ARGV;
 is_file($infile, "Input");
-if (-s $infile < 20_000_000) {
-  msg("Treating file as an assembly");
-  $opt{'L'} = 300 if $opt{L} < 300;
-}
-else {
-  msg("Treating file as as reads");
-  # need to tailor to read length?
-  $opt{'L'} = 99 if $opt{L} > 150;
-}
+
+my $ss = seq_stats($infile);
+$ss->{'type'} eq 'DNA' or err("Input is not DNA");
+my $minlen = max($KMER, min( 600, 
+  int(0.5 * $ss->{'avg_len'} / 3) ) );
+msg("Setting ORF LEN = $minlen");
+
+my $orfm_opt = "-c $opt{T} -m $minlen";
+$orfm_opt .= " -s" if $minlen < 300;
+
+my $PV = "pv -cpe";
 my $metag = $opt{'m'} ? '' : '| LC_ALL=C uniq';
 $opt{'m'} and msg("Enabled -m metagenome mode");
 my $outfile = Path::Tiny->tempfile();
+my $est_lines = int( $ss->{'sum_len'} );
+my $pv_seq = $opt{'q'} ? ''  : "| $PV -N kmers -l -s $est_lines";
+   
+my $dbsize = uncompressed_size($opt{'D'});
+msg("Database is $dbsize bytes");
+my $pv_db = $opt{'q'} ? '' : "| $PV -N match -s $dbsize";
 
 my $cmd = qq/
- orfm -c $opt{T} -s -m $opt{L} \Q$infile\E
- | seqkit sliding -w 0 -W 7 -s 1
+ orfm $orfm_opt \Q$infile\E
+ | seqkit sliding -w 0 -W $KMER -s 1
+ $pv_seq
  | grep -Ev '^>|[XUOW*]'
- | pv -l
  | LC_ALL=C sort --parallel=$opt{j} -S $opt{R}G
  $metag
  | tee \Q$opt{K}\E
  | LC_ALL=C join -t \$'\\t' -j 1 
-            - <(xzcat $opt{D})
+            - <(zstd -dcf $opt{D} $pv_db)
  > $outfile
 /;
 $cmd =~ s/\s+/ /xmsg;
 msg("Running: $cmd") if $opt{d};
-msg("Scanning $infile against $opt{D}");
+msg("Translating ORFs and making $KMER-mers...");
+#msg("Scanning $infile against $opt{D}");
 system('bash', '-c', $cmd)==0 or err($!);
 $outfile->copy($opt{'O'});
 
@@ -139,13 +151,32 @@ for my $gs (sort { $score{$b} <=> $score{$a} } keys %score) {
   # actual outpuit results
   printf "%6.2f%%\t%6.2f%%\t%5d\t%s\n",
     $s_pc, $m_pc, $match{$gs}, $gs;
-  $row++==0 and msg("Top prediction is $gs ($s_pc%)");
-  
+  $row++==0 and msg("Top prediction is $gs ($s_pc%)");  
 }
 msg( motd(0) );
 msg("Done.");
 exit(0);
 
+#......................................................................................
+sub seq_stats {
+  my($fname) = @_;
+  msg("Assessing input file: $fname");
+  my @line = qx"seqkit stats --quiet -T \Q$fname\E | tsvtk transpose -H -t";
+  my $ss = { map { chomp; split m/\t/ } @line };
+  say STDERR Dumper($ss) if $opt{d};
+  return $ss;
+}
+#......................................................................................
+sub uncompressed_size {
+  my($zfile) = @_;
+ my @line = qx"zstd -l -v \Q$zfile\E 2>/dev/null";
+  # Decompressed Size: 7.12 GiB (7647074199 B)
+  foreach (@line) {
+    return $1 if 
+      m/Decompressed S.*?\((\d+)\s+B/;
+  }
+  return 6*(-s $zfile); # fallback estimate
+}
 #......................................................................................
 sub is_file {
   my($fname, $name) = @_;
@@ -168,7 +199,7 @@ sub need_exe {
   my($exe) = @_;
   my $p = which($exe) 
     or err("Please install '$exe'");
-  msg("Found: $exe => $p");
+  msg("Using '$exe' => $p");
 }
 #......................................................................................
 sub version { 
@@ -206,3 +237,4 @@ sub motd {
 }
 #......................................................................................
 
+__DATA__

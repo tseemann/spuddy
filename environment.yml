@@ -5,12 +5,15 @@ dependencies:
   - perl >=5.32
   - perl-path-tiny
   - perl-file-which
+  - zstd
+  - pv
   - libdeflate
   - vmtouch
   - unzip
   - csvtk
   - seqkit
   - orfm
+  - pyrodigal
   - tantan
   - make
   - bats-core

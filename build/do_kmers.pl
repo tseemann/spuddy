@@ -4,9 +4,11 @@ use strict;
 use Path::Tiny;
 use Data::Dumper;
 
-my $COMPRESS = "pigz -p \$CPUS";
-my $ZCAT = "libdeflate-gzip -d -c -f";
-my $CACHE = "vmtouch -q -t";
+my $PIGZ = 'pigz -p $CPUS';
+my $GZIP = "libdeflate-gzip";
+my $XZIP = 'xz -T $CPUS';
+my $ZCAT = "$GZIP -d -c -f";
+my $CACHE = "vmtouch -t";
 
 my $GTDB = "/home/shared/db/gtdb/r226/gtdb_genomes_r226";
 @ARGV or die "$0 KMER STEP MAXSAMP";
@@ -29,7 +31,7 @@ say "set -eu -o pipefail";
 say "CSVTK_THREADS=1";
 say "SEQKIT_THREADS=1";
 say "LC_ALL=C"; 
-say "CPUS=\$(( \$(nproc) / 2))";
+say 'CPUS=$(( $(nproc) / 2))'; # hope we have > 1
 
 my $LOGFILE = "$name.sh.log";
 say "rm -f $LOGFILE";
@@ -125,12 +127,26 @@ say clean("
 ");
 
 # generate cut down versions
+banner("Shrink the databases");
 say "$CACHE $name.db";
-#say qq{echo -e "50\\n75\\n90\\n95\\n" | $PARAJ -v "tsvtk filter2 -H -f '\\\$2 >= 0.{}' $name.db > $name.db.{}pc"};
-#say qq{echo -e "50\\n75\\n90\\n95" | $PARAJ -v "awk -F\$'\\t' '\$2 >= 0.{}' $name.dbb > $name.db.{}pc"};
-say qq/echo -e "50\\n75\\n90\\n95" | $PARAJ -v "awk '\\\$2 >= 0.{}' $name.db > $name.db.{}pc"/;
+say "LINES=\$(wc -l < $name.db)"; # should do in sort command with tee
+for my $PC (50,75,90,95,99) {
+  my $prefix = "$name.db.${PC}pc";
+  say clean("
+    (   cat $name.db 
+      | pv -l -s \$LINES -p -e -N $prefix
+      | awk -F\$'\\t' '\$2 >= 0.${PC}'
+      | tee >($PIGZ > $prefix.gz)
+            >($XZIP > $prefix.xz)
+      > $prefix ) &
+  ");
+}
+say("wait");
+
+# show the results
+banner("Results");
 say "wc -l $name.db*";
-say "\\ls -1sh $name.db*";
+say "\\ls -1shd $name.db*";
 
 # finish up
 banner("Pipeline completed!");
