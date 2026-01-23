@@ -5,10 +5,9 @@ use Path::Tiny;
 use List::Util qw(shuffle);
 use Data::Dumper;
 
-my $ZSTD = 'zstd -p $CPUS';
-my $PIGZ = 'pigz -p $CPUS';
+my $ZSTD = 'zstd -T\$CPUS';
+my $PIGZ = 'pigz -p \$CPUS';
 my $GZIP = "libdeflate-gzip";
-my $XZIP = 'xz -T $CPUS';
 my $ZCAT = "$GZIP -d -c -f";
 my $CACHE = "vmtouch -t";
 
@@ -34,7 +33,7 @@ say STDERR "Suffix: $suffix (for re-usable kmers)";
 my %tax_of;
 my $taxid = 0;
 my @groups;
-my @taxdump;
+my @taxa;
 foreach (path('sp_clusters.tsv')->lines) {
   chomp;
   my @col = split m/\t/;  
@@ -47,12 +46,12 @@ foreach (path('sp_clusters.tsv')->lines) {
   push @groups, "$gs\n";
   ++$taxid;
   $tax_of{$taxid} = $gs;
-  push @taxdump,"$taxid\t$gs\n";
+  push @taxa,"$taxid\t$gs\n";
   say STDERR "$taxid $col[8] $gs";
 }
 my $G = "$name.groups";
 path($G)->spew(\@groups);
-path("$name.taxdump")->spew(\@taxdump);
+path("$name.taxa")->spew(\@taxa);
 
 # main shell script
 open my $OUT, '>', "$name.sh";
@@ -100,8 +99,8 @@ my $faa_fofn = path("$name.faa.fofn");
 $faa_fofn->spew(map { "$_\n" } @faa);
 
 banner("Generating kmers for every isolate");
+#    [[ -f '{}.$suffix' ]] ||
 say "$PARAJ -a $faa_fofn ".dq(clean("
-    [[ -f '{}.$suffix' ]] ||
       seqkit sliding -W $KMER -s $STEP $GTDB/{}
     | tr '[:lower:]' '[:upper:]' 
     | grep -v -E '^>|[XUOW*]'
@@ -118,25 +117,25 @@ say "$PARAJ -a $gcmd";
 banner("Identifying global singleton kmers (slow)");
 #say "$PARA -j 1 -a $G $CACHE {}/$name";
 my $NG = scalar(@G)+1;
+#  [[ -r '$name.kmers' ]] ||
 say clean("
-  [[ -r '$name.uniq' ]] ||
   xargs -a $G -I % echo %/$name 
   | tr '\\n' '\\0'
   | LC_ALL=C sort --merge --files0-from=-
                   --batch-size=$NG
                   --parallel=\$CPUS
   | LC_ALL=C uniq -u
-  > $name.uniq
+  > $name.kmers
 ");
 
 # For each species, find their species-specific ones
-say "$CACHE $name.uniq";
+say "$CACHE $name.kmers";
 banner("Identifying kmers unique to each speices");
-#say "$PARA -j 1 -a $G $CACHE {}/$name";
+#    [[ -r '{}/$name' ]] ||
 say "$PARAJ -a $G ".dq(clean("
-    [[ -r '{}/$name.uniq' ]] ||
-    LC_ALL=C sort --merge $name.uniq {}/$name
-    | LC_ALL=C uniq -d > {}/$name.uniq
+    LC_ALL=C sort --merge $name.kmers {}/$name
+    | LC_ALL=C uniq -d 
+    > {}/$name.uniq
     "));
 
 # combine final uniqmers with our porportion data
@@ -161,21 +160,24 @@ say clean("
   | LC_ALL=C sort --merge --files0-from=-
                   --batch-size=$NG
                   -k 1.1,1.$KMER
-                  -o $name.db
+  | tsvtk join -H -f '4;2' - $name.taxa
+  | tsvtk cut -H -f1,2,5
+  | tsvtk replace -H -f 2 -p '(\\.\\d*[1-9])0+\$|\\.0+\$' -r '\$1'
+  > $name.final
 ");
 
 # generate cut down versions
 banner("Shrink the databases");
-say "$CACHE $name.db";
-say "LINES=\$(wc -l < $name.db)"; # should do in sort command with tee
-for my $PC (50,75,90,95,99) {
+say "$CACHE $name.final";
+say "LINES=\$(wc -l < $name.final)"; # should do in sort command with tee
+for my $PC (qw"01 50 75 90 95 99") {
   my $stem = "$name.db.${PC}pc";
   say clean("
-    (   cat $name.db 
+    (   cat $name.final 
       | pv -l -s \$LINES -pec -N $stem
       | awk '\$2 >= 0.${PC}0'
       > $stem 
-      && $ZSTD --force --keep --quiet $stem
+      && $ZSTD --keep --quiet $stem
       ) &
   ");
 }
@@ -200,7 +202,8 @@ sub species_pepmer {
   my $outname = "$dir/$name";
 #    [[ -f '$outname' ]] ||
   return clean("
-    xargs -a $dir/$name.kmers.fofn -I % $ZCAT $dir/%
+    xargs -a $dir/$name.kmers.fofn 
+          -I % $ZCAT $dir/%
     | tsvtk freq -H --sort-by-key
     | tsvtk mutate2 -H --at 2
             -w 6 -e '\$2 / $num'
