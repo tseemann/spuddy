@@ -21,18 +21,15 @@ my $LIM = shift(@ARGV) // 1000;
 
 say STDERR "Generating: K=$KMER S=$STEP MIN=$MIN LIM=$LIM";
 my $name = "kmers.K$KMER.S$STEP.M$MIN.L$LIM";
+my $suffix = "K$KMER.S$STEP.gz";
 say STDERR "Prefix: $name";
+say STDERR "Suffix: $suffix (for re-usable kmers)";
 
 #     0	Representative genome
 #     1	GTDB species
 #     2	GTDB taxonomy
-#     3	ANI circumscription radius
-#     4	Mean intra-species ANI
-#     5	Min intra-species ANI
-#     6	Mean intra-species AF
-#     7	Min intra-species AF
 #     8	No. clustered genomes
-#     9	Clustered genomes
+#     9	Clustered genomes (CSV)
 
 my %tax_of;
 my $taxid = 0;
@@ -81,28 +78,35 @@ my @G = sort(path($G)->lines({chomp=>1}));
 
 my @faa;
 my @gcmd;
-my @kfile;
+#my @kfile;
 for my $g (@G) {
   say STDERR "Prepping: $g";
   my @kmerf;
-  my $N=0;
   for my $a (shuffle  path("$GTDB/$g/proteomes.txt")->lines({chomp=>1}) ) {
     push @faa, "$g/$a";
-    push @kmerf, "$a.$KMER.$STEP.gz";
-    last if @faa >= $LIM; 
+    push @kmerf, "$a.$suffix";
+    last if @kmerf >= $LIM; 
   }
-  my $cmd = species_pepmer($g,$name,$N);
-  #push @uniq, "$g/$name";
-  push @gcmd, $cmd;
-  
+
+  push @gcmd, 
+    species_pepmer( $g, $name, scalar(@kmerf) );
+
   # keep track of subset of files we kmered
-  my $kmerf = path("$g/$name.list.fofn");
-  $kmerf->spew(map { "$_\n" } @kmerf);
+  path("$g/$name.kmers.fofn")->spew(
+    map { "$_\n" } @kmerf);
 }
+
 my $faa_fofn = path("$name.faa.fofn");
 $faa_fofn->spew(map { "$_\n" } @faa);
-banner("Generating kmers per isolate");
-say "$PARAJ -a $faa_fofn ".dq(faa2pep());
+
+banner("Generating kmers for every isolate");
+say "$PARAJ -a $faa_fofn ".dq(clean("
+    [[ -f '{}.$suffix' ]] ||
+      seqkit sliding -W $KMER -s $STEP $GTDB/{}
+    | tr '[:lower:]' '[:upper:]' 
+    | grep -v -E '^>|[XUOW*]'
+    | tsvtk uniq -H -o {}.$suffix
+  "));
 
 # count uniq kmers per isolate
 my $gcmd = path("$name.gcmd");
@@ -126,7 +130,7 @@ say clean("
 ");
 
 # For each species, find their species-specific ones
-say "$CACHE -t $name.uniq";
+say "$CACHE $name.uniq";
 banner("Identifying kmers unique to each speices");
 #say "$PARA -j 1 -a $G $CACHE {}/$name";
 say "$PARAJ -a $G ".dq(clean("
@@ -165,13 +169,13 @@ banner("Shrink the databases");
 say "$CACHE $name.db";
 say "LINES=\$(wc -l < $name.db)"; # should do in sort command with tee
 for my $PC (50,75,90,95,99) {
-  my $prefix = "$name.db.${PC}pc";
+  my $stem = "$name.db.${PC}pc";
   say clean("
     (   cat $name.db 
-      | pv -l -s \$LINES -p -e -N $prefix
-      | awk -F\$'\\t' '\$2 >= 0.${PC}'
-      > $prefix 
-      && $ZSTD --keep $prefix
+      | pv -l -s \$LINES -pec -N $stem
+      | awk '\$2 >= 0.${PC}0'
+      > $stem 
+      && $ZSTD --force --keep --quiet $stem
       ) &
   ");
 }
@@ -179,7 +183,7 @@ say("wait");
 
 # show the results
 banner("Results");
-say "wc -l $name.db*";
+say "wc -l $name.db*pc";
 say "\\ls -1shd $name.db*";
 
 # finish up
@@ -194,12 +198,12 @@ exit(0);
 sub species_pepmer {
   my($dir,$name,$num) = @_;
   my $outname = "$dir/$name";
+#    [[ -f '$outname' ]] ||
   return clean("
-    [[ -f '$outname' ]] ||
-    xargs -a $dir/$name.list.fofn -I % $ZCAT $dir/%
+    xargs -a $dir/$name.kmers.fofn -I % $ZCAT $dir/%
     | tsvtk freq -H --sort-by-key
     | tsvtk mutate2 -H --at 2
-            -w 5 -e '\$2 / $num'
+            -w 6 -e '\$2 / $num'
     | tee $dir/$name.freq
     | cut -f 1 
     > $outname
@@ -210,18 +214,6 @@ sub dq {
   $_ = shift;
   s/"/\\"/g;
   return qq/"$_"/;
-}
-#...........................................
-sub faa2pep {
-  my $outname = "{}.$KMER.$STEP.gz";
-  return clean("
-    [[ -f '$outname' ]] ||
-    $ZCAT $GTDB/{}
-    | seqkit sliding -W $KMER -s $STEP
-    | tr '[:lower:]' '[:upper:]' 
-    | grep -v -E '^>|[XUOW*]'
-    | tsvtk uniq -H -o $outname
-  ");
 }
 #...........................................
 sub clean {
