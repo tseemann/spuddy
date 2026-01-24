@@ -12,7 +12,7 @@ use FindBin;
 binmode(STDERR, ":utf8"); # for UTF-8 emoji
 
 #......................................................................................
-my $VERSION = "0.4.1";
+my $VERSION = "0.5.0";
 my $EXE = path($0)->basename;
 my $URL = 'https://github.com/tseemann/spuddy';
 my $ICON = "\x{1F954}"; # potato
@@ -21,14 +21,14 @@ my %opt = (
 #  'D' => 'kmers.7.1.50.db.95pc',
   'D' => 'kmers.K8.S1.M50.L50.db.99pc.zst',
   'c' => 11,
-  'L' => 100,
+#  'L' => 'auto',
   'K' => '/dev/null',
   'O' => '/dev/null',
   'o' => '/dev/stdout',
-  'j' => 1,
-  'R' => 8,
+  'j' => 'auto',
+  'R' => 16,
   't' => '0.50',
-  'p' => '1.0',
+  'p' => 'auto',
 );
 #......................................................................................
 sub usage {
@@ -47,10 +47,10 @@ sub usage {
     "SETTINGS\n",
     "  -D FILE  Database file [$opt{D}]\n",
     "  -c CODE  Genetic code [$opt{c}]\n",
-    "  -L LEN   Minimum protein length [$opt{L}]\n",
+#    "  -L LEN   Minimum protein length [$opt{L}]\n",
     "  -m       Metagenome mode\n",
     "OUTPUTS\n",
-    "  -1       Just prin the prediction!\m",
+    "  -1       Just prin the prediction!\n",
     "  -t n.nn  Threshold for reporting [$opt{t}]\n",
     "  -o FILE  Species prediction result [$opt{o}]\n",
     "  -O FILE  Save raw result file [$opt{O}]\n",
@@ -84,31 +84,23 @@ is_file($opt{'D'}, "database -D");
 is_float($opt{'p'}, "proportaion -p", 0, 1);
 is_float($opt{'t'}, "threshold -t", 0, 1);
 
-my $CPUS = num_cpus();
-is_int($opt{'j'}, "CPUs -j", 1, $CPUS); 
-# this is for co-running tasks:
-my $cpus = max( 1, min(4, int($CPUS/4)) );
-
 #......................................................................................
 msg("This is $EXE $VERSION");
 need_exe($_) for qw(
-  orfm pyrodigal seqkit tsvtk zstd);
+  orfm zstd libdeflate-gzip seqkit tsvtk);
 
-
+# set number of CPU cores if auto mode
+my $cpus = num_cpus();
+$opt{'j'} = $cpus if !$opt{j} or $opt{j} eq 'auto';
+is_int($opt{j}, '-j CPUs', 1, $cpus);
+msg("Will use $cpus threads and $opt{R} GB RAM");
 
 # guess kmer size from DB name
 $opt{'D'} =~ m/(\d+)/;
 my $KMER = $1 or err("Can not determine database k-mer size");
 
 # find the taxa table
-my $taxa_fn = $opt{'D'};
-$taxa_fn =~ s/\.db.*$/.taxa/;
-is_file($taxa_fn, "Taxa file");
-my %species_of = (
-  map { split m/\t/ }
-    path($taxa_fn)->lines({chomp=>1})
-);
-msg("Loaded", scalar(keys %species_of), "taxa names");
+my $species_of = load_taxa();
 
 # just process the first file
 my $infile = shift @ARGV;
@@ -117,13 +109,17 @@ is_file($infile, "Input");
 # Set paramets based on ASM, ILL< ONT
 my $ss = seq_stats($infile);
 $ss->{'type'} eq 'DNA' or err("Input is not DNA");
-my $minlen = max($KMER, min( 600, 
-  int(0.5 * $ss->{'avg_len'} / 3) ) );
-msg("Setting ORF LEN = $minlen");
-$opt{'s'} = 0.001 if $ss->{'avg_len'} < 500;
-
-my $orfm_opt = "-c $opt{c} -m $minlen";
-$orfm_opt .= " -s" if $minlen < 300;
+my $minlen = 600;
+my $prop = $opt{'p'} eq 'auto' ? 1 : $opt{p};
+my $orfm_opt = "-c $opt{c}";
+if ($ss->{'avg_len'} <= 602) { # iSeq100+ soon?
+  msg("Input looks like short reads");
+  $prop = 0.005 if $prop eq 'auto';
+  $minlen = int($ss->{'avg_len'} / 6);
+  $orfm_opt .= " -s";
+}
+$orfm_opt .= " -m $minlen";
+msg("Sampling ORFs > $minlen @ $prop");
 
 my $PV = "pv -cpe";
 my $metag = $opt{'m'} ? '' : '| LC_ALL=C uniq';
@@ -136,27 +132,31 @@ my $dbsize = uncompressed_size($opt{'D'});
 msg(sprintf "Database is %d MB", $dbsize/1E6 );
 my $pv_db = $opt{'q'} ? '' : "| $PV -N '$ICON Scanning' -s $dbsize";
 
-my $cmd = qq/
-   seqkit sample -j $cpus --quiet -p $opt{p} \Q$infile\E
+my $to_fasta = $ss->{'type'} eq 'FASTQ'
+  ? "| sed -n '1~4s/^\@.*\$/>x/p; 2~4p" : '';
+
+my $cmd = "
+   libdeflate-gzip -dcf \Q$infile\E
+ $to_fasta
+ | seqkit sample -p $prop -w 0 -j $cpus --quiet
  | orfm $orfm_opt
- | seqkit sliding -j $cpus -w 0 -W $KMER -s 1
+ | awk '{ for (i=1; i<=length(\$0)-$KMER+1; i++) print substr(\$0, i, $KMER) }'
  | grep -Ev '^>|[XUOW*]'
- | LC_ALL=C sort --parallel=$opt{j} -S $opt{R}G
+ | LC_ALL=C sort -S $opt{R}G --parallel=$opt{j} -S $opt{R}G
  $metag
  | tee \Q$opt{K}\E
  | LC_ALL=C join -t \$'\\t' -j 1 
             - <(zstd -dcf $opt{D} $pv_db)
  > $outfile
-/;
+";
 $cmd =~ s/\s+/ /xmsg;
-msg("Running: $cmd") if $opt{d};
+msg("Running: $cmd") if $opt{'d'};
 msg("Translating ORFs and making $KMER-mers...");
 #msg("Scanning $infile against $opt{D}");
 system('bash', '-c', $cmd)==0 or err($!);
 $outfile->copy($opt{'O'});
 
 my %score;
-my %match;
 foreach (path($outfile)->lines({chomp=>1})) {
   # LYKYKVA 0.945946 105 Bacteria/Coprococcus/acet
   my(undef,$p,$taxid) = split m/\t/;
@@ -167,22 +167,39 @@ my $sum_score = sum(values %score);
 my $out_fh = path($opt{'o'})->filehandle('>');
 select $out_fh;
 
-my $row=0;
+my @hit;
 for my $taxid (sort { $score{$b} <=> $score{$a} } keys %score) {
-  next if $score{$taxid} <= 1;
   my $s_pc = $score{$taxid}*100/$sum_score,;
   last if $s_pc < $opt{'t'};
-  my $name = $species_of{$taxid} or err("Unknown taxon $taxid!");
+  my $name = $species_of->{$taxid} or err("Unknown taxon $taxid!");
   $name = join ' ', (split(m'/', $name, 3))[1,2] ;
-  # actual outpuit results
-  printf "%.2f%%\t%s\n", $s_pc, $name;
-  $row++==0 and msg("PREDICTION: $name");  
+  push @hit, [ $s_pc, $name ];
 }
+
+if ($opt{'1'}) {
+  say "$infile\t$hit[0][1]";
+}
+else {
+  printf "%.2f%%\t%s\n",, $_->[0], $_->[1] for @hit;  
+}
+
 msg( motd(0) );
 msg("Thank you using $EXE !");
 msg("Done.");
 exit(0);
 
+#......................................................................................
+sub load_taxa {
+  my $taxa_fn = $opt{'D'};
+  $taxa_fn =~ s/\.db.*$/.taxa/;
+  is_file($taxa_fn, "Taxa file");
+  my $species_of = {
+    map { split m/\t/ }
+      path($taxa_fn)->lines({chomp=>1})
+  };
+  msg("Loaded", scalar(keys %$species_of), "taxa names");
+  return $species_of;
+}
 #......................................................................................
 sub seq_stats {
   my($fname, $max) = @_;
@@ -212,18 +229,23 @@ sub num_cpus {
 sub is_file {
   my($fname, $name) = @_;
   -r $fname or err("$name '$fname' is not a valid file") ;
+  return $fname;
 } 
 #......................................................................................
 sub is_int {
   my($s, $name, $min, $max) = @_;
+  return if !defined($s) or $s eq 'auto';
   $s =~ m/^[-+]?\d+$/ && $s >= $min && $s <= $max
     or err("$name must be an integer between $min and $max");
+  return $s;
 } 
 #......................................................................................
 sub is_float {
   my($s, $name, $min, $max) = @_;
+  return if !defined($s) or $s eq 'auto';
   $s =~ m/^[-+]?\d+(\.\d+)?$/ && $s >= $min && $s <= $max
     or err("$name must be a number between $min and $max");
+  return $s;
 } 
 #......................................................................................
 sub need_exe {
@@ -259,13 +281,18 @@ Potato, rice, or pasta - choose your starch weapon!
 The German word for potato is 'Karoffel'
 Unleash the potatoes!
 Does gnocchi really count as pasta?
-Check out the docs at $URL
-Not happy with $EXE ? Tell me at $URL/issues
+Check out the docs at https://github.com/tseemann/spuddy/
+Not happy with $EXE ? Tell me at https://github.com/tseemann/spuddy/issues
 Spuddy is your best buddy when it comes to bacterial ID
 Sylph is also a good tool! https://github.com/bluenote-1577/sylph
 Kraken is where it all began: https://github.com/DerrickWood/kraken2
 Put another spud on the barbie!
-I wouldn't put good money on $EXE\'s prediction
 My gaming PC is sad potato...
 True Irish people eat potatoes three ways at every meal
 Germanic potato salad is one of my favourite foods    
+Did you know Spuddy runs mostly standard Unix tools?
+If you owned an Intel 16" Macbook you know what a potato is.
+In Australia we call (French) fries "chips"
+Use -j to give Spuddy for CPUs to go even faster
+Use -R to give Spuddy more RAM to go faster
+
