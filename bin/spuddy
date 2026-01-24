@@ -9,22 +9,27 @@ use Data::Dumper;
 use List::Util qw(min max sum);
 use FindBin;
 
+binmode(STDERR, ":utf8"); # for UTF-8 emoji
+
 #......................................................................................
-my $VERSION = "0.3.0";
+my $VERSION = "0.4.0";
 my $EXE = path($0)->basename;
 my $URL = 'https://github.com/tseemann/spuddy';
+my $DOG = "\x{1f436}"; # dog face UTF-8 emoki
+my $POTATO = "\x{1F954}";
 
 my %opt = (
 #  'D' => 'kmers.7.1.50.db.95pc',
-  'D' => 'kmers.8.1.10.db.95pc.zst',
-  'T' => 11,
+  'D' => 'kmers.K8.S1.M50.L50.db.99pc.zst',
+  'c' => 11,
   'L' => 100,
   'K' => '/dev/null',
   'O' => '/dev/null',
   'o' => '/dev/stdout',
   'j' => 1,
   'R' => 8,
-  'p' => '0.50',
+  't' => '0.50',
+  'p' => '1.0',
 );
 #......................................................................................
 sub usage {
@@ -42,15 +47,16 @@ sub usage {
     "  -d       Output debug information\n",
     "SETTINGS\n",
     "  -D FILE  Database file [$opt{D}]\n",
-    "  -T CODE  Genetic code [$opt{T}]\n",
+    "  -c CODE  Genetic code [$opt{c}]\n",
     "  -L LEN   Minimum protein length [$opt{L}]\n",
     "  -m       Metagenome mode\n",
     "OUTPUTS\n",
-    "  -p n.nn  Threshold for reporting [$opt{p}]\n",
+    "  -t n.nn  Threshold for reporting [$opt{t}]\n",
     "  -o FILE  Species prediction result [$opt{o}]\n",
     "  -O FILE  Save raw result file [$opt{O}]\n",
     "  -K FILE  Save kmers to this file [$opt{K}]\n",
     "SPEED\n",
+    "  -p PROP  Sample this proportion of input [$opt{p}]\n",
     "  -j CPUS  Threads to use [$opt{j}]\n",
     "  -R RAM   Keep RAM usage below [$opt{R}] GB\n",
     "HOMEPAGE\n  $URL\n",
@@ -62,7 +68,7 @@ sub msg { print STDERR "@_\n" unless $opt{'q'}; }
 sub wrn { msg("WARNING:", @_); }
 sub err { print STDERR "ERROR: @_\n"; exit(-1); }
 #......................................................................................
-getopts('vhqCdmMT:D:L:K:j:R:O:o:p:', \%opt) or exit(-1);
+getopts('vhqCdmMc:D:L:K:j:R:O:o:p:t:', \%opt) or exit(-1);
 
 $opt{'v'} and version();
 $opt{'C'} and citation();
@@ -71,31 +77,52 @@ $opt{'M'} and motd(42);
 
 @ARGV or usage(1);
 
-is_int($opt{'T'}, "-T", 1, 33);
-is_int($opt{'L'}, "-L", 30, 999);
-is_int($opt{'j'}, "-j", 1, 512); # need cpus()
-is_int($opt{'R'}, "-R", 1, 4096); # need ram()
-is_file($opt{'D'}, "-D");
-is_float($opt{'p'}, "-p", 0, 1);
+is_int($opt{'c'}, "Genetic code -c", 1, 33);
+is_int($opt{'L'}, "Min ORF length -L", 30, 999);
+is_int($opt{'R'}, "RAM -R", 1, 4096); # need ram()
+is_file($opt{'D'}, "database -D");
+is_float($opt{'p'}, "proportaion -p", 0, 1);
+is_float($opt{'t'}, "threshold -t", 0, 1);
+
+my $CPUS = num_cpus();
+is_int($opt{'j'}, "CPUs -j", 1, $CPUS); 
+# this is for co-running tasks:
+my $cpus = max( 1, min(4, int($CPUS/4)) );
+
 #......................................................................................
 msg("This is $EXE $VERSION");
 need_exe($_) for qw(
-  orfm pyrogial seqkit tsvtk zstd);
+  orfm pyrodigal seqkit tsvtk zstd);
+
+
 
 # guess kmer size from DB name
 $opt{'D'} =~ m/(\d+)/;
-my $KMER = $1 // 7;
+my $KMER = $1 or err("Can not determine database k-mer size");
 
+# find the taxa table
+my $taxa_fn = $opt{'D'};
+$taxa_fn =~ s/\.db.*$/.taxa/;
+is_file($taxa_fn, "Taxa file");
+my %species_of = (
+  map { split m/\t/ }
+    path($taxa_fn)->lines({chomp=>1})
+);
+msg("Loaded", scalar(keys %species_of), "taxa names");
+
+# just process the first file
 my $infile = shift @ARGV;
 is_file($infile, "Input");
 
+# Set paramets based on ASM, ILL< ONT
 my $ss = seq_stats($infile);
 $ss->{'type'} eq 'DNA' or err("Input is not DNA");
 my $minlen = max($KMER, min( 600, 
   int(0.5 * $ss->{'avg_len'} / 3) ) );
 msg("Setting ORF LEN = $minlen");
+$opt{'s'} = 0.001 if $ss->{'avg_len'} < 500;
 
-my $orfm_opt = "-c $opt{T} -m $minlen";
+my $orfm_opt = "-c $opt{c} -m $minlen";
 $orfm_opt .= " -s" if $minlen < 300;
 
 my $PV = "pv -cpe";
@@ -106,13 +133,13 @@ my $est_lines = int( $ss->{'sum_len'} );
 my $pv_seq = $opt{'q'} ? ''  : "| $PV -N kmers -l -s $est_lines";
    
 my $dbsize = uncompressed_size($opt{'D'});
-msg("Database is $dbsize bytes");
-my $pv_db = $opt{'q'} ? '' : "| $PV -N match -s $dbsize";
+msg(sprintf "Database is %d MB", $dbsize/1E6 );
+my $pv_db = $opt{'q'} ? '' : "| $PV -N '$DOG sniffing' -s $dbsize";
 
 my $cmd = qq/
- orfm $orfm_opt \Q$infile\E
- | seqkit sliding -w 0 -W $KMER -s 1
- $pv_seq
+   seqkit sample -j $cpus --quiet -p $opt{p} \Q$infile\E
+ | orfm $orfm_opt
+ | seqkit sliding -j $cpus -w 0 -W $KMER -s 1
  | grep -Ev '^>|[XUOW*]'
  | LC_ALL=C sort --parallel=$opt{j} -S $opt{R}G
  $metag
@@ -132,36 +159,36 @@ my %score;
 my %match;
 foreach (path($outfile)->lines({chomp=>1})) {
   # LYKYKVA 0.945946 105 Bacteria/Coprococcus/acet
-  my(undef,$p,$n,$gs) = split m/\t/;
-  $score{$gs} += $p;
-  $match{$gs} ++;
+  my(undef,$p,$taxid) = split m/\t/;
+  $score{$taxid} += $p;
 }
 my $sum_score = sum(values %score);
-my $sum_match = sum(values %match);
 
 my $out_fh = path($opt{'o'})->filehandle('>');
 select $out_fh;
 
 my $row=0;
-for my $gs (sort { $score{$b} <=> $score{$a} } keys %score) {
-  next if $match{$gs} <= 1;
-  my $s_pc = $score{$gs}*100/$sum_score,;
-  last if $s_pc < $opt{'p'};
-  my $m_pc = $match{$gs}*100/$sum_match;
+for my $taxid (sort { $score{$b} <=> $score{$a} } keys %score) {
+  next if $score{$taxid} <= 1;
+  my $s_pc = $score{$taxid}*100/$sum_score,;
+  last if $s_pc < $opt{'t'};
+  my $name = $species_of{$taxid} or err("Unknown taxon $taxid!");
+  $name = join ' ', (split(m'/', $name, 3))[1,2] ;
   # actual outpuit results
-  printf "%6.2f%%\t%6.2f%%\t%5d\t%s\n",
-    $s_pc, $m_pc, $match{$gs}, $gs;
-  $row++==0 and msg("Top prediction is $gs ($s_pc%)");  
+  printf "%.2f%%\t%s\n", $s_pc, $name;
+  $row++==0 and msg("$POTATO PREDICTION: $name");  
 }
 msg( motd(0) );
+msg("$DOG Thank you using $EXE !");
 msg("Done.");
 exit(0);
 
 #......................................................................................
 sub seq_stats {
-  my($fname) = @_;
+  my($fname, $max) = @_;
+  $max //= "10M"; # peek at first 10 megabases
   msg("Assessing input file: $fname");
-  my @line = qx"seqkit stats --quiet -T \Q$fname\E | tsvtk transpose -H -t";
+  my @line = qx"seqkit head -l $max \Q$fname\E | seqkit stats --quiet -T | tsvtk transpose -H -t";
   my $ss = { map { chomp; split m/\t/ } @line };
   say STDERR Dumper($ss) if $opt{d};
   return $ss;
@@ -176,6 +203,10 @@ sub uncompressed_size {
       m/Decompressed S.*?\((\d+)\s+B/;
   }
   return 6*(-s $zfile); # fallback estimate
+}
+#......................................................................................
+sub num_cpus {
+  $_ = qx"nproc"; chomp; return $_;
 }
 #......................................................................................
 sub is_file {
