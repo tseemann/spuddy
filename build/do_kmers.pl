@@ -5,6 +5,8 @@ use Path::Tiny;
 use List::Util qw(shuffle);
 use Data::Dumper;
 
+srand(42); # same 'shuffle' results each time
+
 my $ZSTD = 'zstd -T\$CPUS';
 my $PIGZ = 'pigz -p \$CPUS';
 my $GZIP = "libdeflate-gzip";
@@ -34,14 +36,19 @@ my %tax_of;
 my $taxid = 0;
 my @groups;
 my @taxa;
+my $DIV = 'Bacteria';
 foreach (path('sp_clusters.tsv')->lines) {
   chomp;
   my @col = split m/\t/;  
   next unless $col[8] >= $MIN;
-  next unless $col[2] =~ m/d__Bacteria/;
-  my $gs = $col[1];
-  $gs =~ s/s__/Bacteria /;
-  $gs =~ s/\s+/\//g;
+  next unless $col[2] =~ m/d__$DIV/;
+  my($genus,$species) = split ' ', $col[1];
+  $genus =~ s/s__//;
+  my $gs = "$DIV/$genus/$species";
+  if ($genus =~ m/[0-9]/) {
+    say STDERR "Skipping: $gs";
+    next;
+  }
   path($gs)->mkpath;
   push @groups, "$gs\n";
   ++$taxid;
@@ -99,8 +106,8 @@ my $faa_fofn = path("$name.faa.fofn");
 $faa_fofn->spew(map { "$_\n" } @faa);
 
 banner("Generating kmers for every isolate");
-#    [[ -f '{}.$suffix' ]] ||
 say "$PARAJ -a $faa_fofn ".dq(clean("
+    [[ -f '{}.$suffix' ]] ||
       seqkit sliding -W $KMER -s $STEP $GTDB/{}
     | tr '[:lower:]' '[:upper:]' 
     | grep -v -E '^>|[XUOW*]'
@@ -177,11 +184,15 @@ for my $PC (qw"01 50 75 90 95 99") {
       | pv -l -s \$LINES -pec -N $stem
       | awk '\$2 >= 0.${PC}0'
       > $stem 
-      && $ZSTD --keep --quiet $stem
       ) &
   ");
 }
 say("wait");
+sat("rm -fv $name.db.*");
+say("zstd --keep $name.db.*"
+
+banner("Cleanup");
+say "rm -fv $name.{faa.fofn,gcmd}";
 
 # show the results
 banner("Results");
@@ -193,7 +204,7 @@ banner("Pipeline completed!");
 say "echo  less -S $name.counts";
 
 system "chmod +x $name.sh";
-say STDERR "Run this!\n  ./$name.sh";
+say STDERR "Run this: ./$name.sh";
 exit(0);
 
 #...........................................
