@@ -173,11 +173,11 @@ for my $taxid (sort { $score{$b} <=> $score{$a} } keys %score) {
   last if $s_pc < $opt{'t'};
   my $name = $species_of->{$taxid} or err("Unknown taxon $taxid!");
   $name = join ' ', (split(m'/', $name, 3))[1,2] ;
-  push @hit, [ $s_pc, $name ];
+  push @hit, [ $s_pc, $name, $score{$taxid} ];
 }
 
 if ($opt{'1'}) {
-  say "$infile\t$hit[0][1]";
+  say "$infile\t$hit[0][1]\t$hit[0][2]";
 }
 else {
   printf "%.2f%%\t%s\n",, $_->[0], $_->[1] for @hit;  
