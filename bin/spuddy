@@ -12,7 +12,7 @@ use FindBin;
 binmode(STDERR, ":utf8"); # for UTF-8 emoji
 
 #......................................................................................
-my $VERSION = "0.5.1";
+my $VERSION = "0.6.1";
 my $EXE = path($0)->basename;
 my $URL = 'https://github.com/tseemann/spuddy';
 my $ICON = "\x{1F954}"; # potato
@@ -44,6 +44,7 @@ sub usage {
     "  -C       Show citation and exit\n",
     "  -q       No output while running, only errors\n",
     "  -d       Output debug information\n",
+    "  -f FOFN  Input file of filenames\n",
     "SETTINGS\n",
     "  -D FILE  Database file [$opt{D}]\n",
     "  -c CODE  Genetic code [$opt{c}]\n",
@@ -68,7 +69,7 @@ sub msg { print STDERR "$ICON @_\n" unless $opt{'q'}; }
 sub wrn { msg("WARNING:", @_); }
 sub err { print STDERR "ERROR: @_\n"; exit(-1); }
 #......................................................................................
-getopts('vhqCdmM1c:D:L:K:j:R:O:o:p:t:', \%opt) or exit(-1);
+getopts('vhqCdmM1c:f:D:L:K:j:R:O:o:p:t:', \%opt) or exit(-1);
 
 $opt{'v'} and version();
 $opt{'C'} and citation();
@@ -83,10 +84,12 @@ is_int($opt{'R'}, "RAM -R", 1, 4096); # need ram()
 is_file($opt{'D'}, "database -D");
 is_float($opt{'p'}, "proportaion -p", 0, 1);
 is_float($opt{'t'}, "threshold -t", 0, 1);
+is_file($opt{'f'}, "FOFN -f") if $opt{'f'};
 
 #......................................................................................
 msg("This is $EXE $VERSION");
 need_exe($_) for qw(
+  parallel parsort awk sort join sed
   orfm zstd libdeflate-gzip seqkit tsvtk);
 
 # set number of CPU cores if auto mode
@@ -102,7 +105,13 @@ my $KMER = $1 or err("Can not determine database k-mer size");
 # find the taxa table
 my $species_of = load_taxa();
 
-# just process the first file
+if (my $fofn = $opt{'f'}) {
+  my @fofn = path($fofn)->lines({chomp=>1});
+  msg("Read",0+@fofn,"filenames from $fofn");
+  push @ARGV, @fofn;
+}
+
+#for my $infile (@ARGV) {
 my $infile = shift @ARGV;
 is_file($infile, "Input");
 
@@ -110,7 +119,7 @@ is_file($infile, "Input");
 my $ss = seq_stats($infile);
 $ss->{'type'} eq 'DNA' or err("Input is not DNA");
 my $minlen = 600;
-my $prop = $opt{'p'} eq 'auto' ? 1 : $opt{p};
+my $prop = $opt{'p'}; # eq 'auto' ? 1 : $opt{p};
 my $orfm_opt = "-c $opt{c}";
 if ($ss->{'avg_len'} <= 602) { # iSeq100+ soon?
   msg("Input looks like short reads");
@@ -118,6 +127,9 @@ if ($ss->{'avg_len'} <= 602) { # iSeq100+ soon?
   $minlen = int($ss->{'avg_len'} / 6);
   $minlen = $minlen - ($minlen % 3);
   $orfm_opt .= " -s";
+}
+else {
+  $prop = 1 if $prop eq 'auto';
 }
 $orfm_opt .= " -m $minlen";
 msg("Sampling ORFs > $minlen @ $prop");
@@ -143,7 +155,11 @@ my $cmd = "
  | orfm $orfm_opt
  | awk '{ for (i=1; i<=length(\$0)-$KMER+1; i++) print substr(\$0, i, $KMER) }'
  | grep -Ev '^>|[XUOW*]'
- | LC_ALL=C sort -S $opt{R}G --parallel=$opt{j} -S $opt{R}G
+ | LC_ALL=C parsort \
+            -S $opt{R}G 
+            --parallel=$opt{j}
+            --key=1.1,1.$KMER
+            --stable
  $metag
  | tee \Q$opt{K}\E
  | LC_ALL=C join -t \$'\\t' -j 1 
@@ -176,7 +192,7 @@ for my $taxid (sort { $score{$b} <=> $score{$a} } keys %score) {
   $name = join ' ', (split(m'/', $name, 3))[1,2] ;
   push @hit, [ $s_pc, $name, $score{$taxid} ];
 }
-push @hit, [ 0, "NO SPECIES", 0 ];
+push @hit, [ 0, "NO SPECIES", 0 ] unless @hit;
 
 if ($opt{'1'}) {
   say "$infile\t$hit[0][1]\t$hit[0][2]";

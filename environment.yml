@@ -5,6 +5,7 @@ dependencies:
   - perl >=5.32
   - perl-path-tiny
   - perl-file-which
+  - parallel
   - zstd
   - pv
   - libdeflate
