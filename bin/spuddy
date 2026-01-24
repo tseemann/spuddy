@@ -12,11 +12,10 @@ use FindBin;
 binmode(STDERR, ":utf8"); # for UTF-8 emoji
 
 #......................................................................................
-my $VERSION = "0.4.0";
+my $VERSION = "0.4.1";
 my $EXE = path($0)->basename;
 my $URL = 'https://github.com/tseemann/spuddy';
-my $DOG = "\x{1f436}"; # dog face UTF-8 emoki
-my $POTATO = "\x{1F954}";
+my $ICON = "\x{1F954}"; # potato
 
 my %opt = (
 #  'D' => 'kmers.7.1.50.db.95pc',
@@ -51,6 +50,7 @@ sub usage {
     "  -L LEN   Minimum protein length [$opt{L}]\n",
     "  -m       Metagenome mode\n",
     "OUTPUTS\n",
+    "  -1       Just prin the prediction!\m",
     "  -t n.nn  Threshold for reporting [$opt{t}]\n",
     "  -o FILE  Species prediction result [$opt{o}]\n",
     "  -O FILE  Save raw result file [$opt{O}]\n",
@@ -64,11 +64,11 @@ sub usage {
   exit($errcode);
 }
 #......................................................................................
-sub msg { print STDERR "@_\n" unless $opt{'q'}; }
+sub msg { print STDERR "$ICON @_\n" unless $opt{'q'}; }
 sub wrn { msg("WARNING:", @_); }
 sub err { print STDERR "ERROR: @_\n"; exit(-1); }
 #......................................................................................
-getopts('vhqCdmMc:D:L:K:j:R:O:o:p:t:', \%opt) or exit(-1);
+getopts('vhqCdmM1c:D:L:K:j:R:O:o:p:t:', \%opt) or exit(-1);
 
 $opt{'v'} and version();
 $opt{'C'} and citation();
@@ -134,7 +134,7 @@ my $pv_seq = $opt{'q'} ? ''  : "| $PV -N kmers -l -s $est_lines";
    
 my $dbsize = uncompressed_size($opt{'D'});
 msg(sprintf "Database is %d MB", $dbsize/1E6 );
-my $pv_db = $opt{'q'} ? '' : "| $PV -N '$DOG sniffing' -s $dbsize";
+my $pv_db = $opt{'q'} ? '' : "| $PV -N '$ICON Scanning' -s $dbsize";
 
 my $cmd = qq/
    seqkit sample -j $cpus --quiet -p $opt{p} \Q$infile\E
@@ -176,10 +176,10 @@ for my $taxid (sort { $score{$b} <=> $score{$a} } keys %score) {
   $name = join ' ', (split(m'/', $name, 3))[1,2] ;
   # actual outpuit results
   printf "%.2f%%\t%s\n", $s_pc, $name;
-  $row++==0 and msg("$POTATO PREDICTION: $name");  
+  $row++==0 and msg("PREDICTION: $name");  
 }
 msg( motd(0) );
-msg("$DOG Thank you using $EXE !");
+msg("Thank you using $EXE !");
 msg("Done.");
 exit(0);
 
@@ -244,28 +244,28 @@ sub citation {
 }
 #......................................................................................
 sub motd {
-  my @motd = (
-    "Maybe a potato can beat a fearsome octopus?",
-    "A 'spud' is a nickname for a potato",
-    "Potato is more versatile than baked goods",
-    "Potato, rice, or pasta - choose your starch weapon!",
-    "The German word for potato is 'Karoffel'",
-    "Unleash the potatoes!",
-    "Does gnocchi really count as pasta?",
-    "Check out the docs at $URL",
-    "Not happy with $EXE ? Tell me at $URL/issues",
-    "Spuddy is your best buddy when it comes to bacterial ID",
-    "Sylph is also a good tool! https://github.com/bluenote-1577/sylph",
-    "Kraken is where it all began: https://github.com/DerrickWood/kraken2",
-    "Put another spud on the barbie!",
-    "I wouldn't put good money on $EXE\'s prediction",
-    "My gaming PC is sad potato...",
-    "True Irish people eat potatoes three ways at every meal",
-    "Germanic potato salad is one of my favourite foods",    
-  );
+  my @motd = <DATA>;
+  chomp @motd;
   if ($_[0]) { say "* $_" for @motd; exit(0); }
   return $motd[ int(rand(@motd)) ];
 }
 #......................................................................................
 
 __DATA__
+Maybe a potato can beat a fearsome octopus?
+A 'spud' is a nickname for a potato
+Potato is more versatile than baked goods
+Potato, rice, or pasta - choose your starch weapon!
+The German word for potato is 'Karoffel'
+Unleash the potatoes!
+Does gnocchi really count as pasta?
+Check out the docs at $URL
+Not happy with $EXE ? Tell me at $URL/issues
+Spuddy is your best buddy when it comes to bacterial ID
+Sylph is also a good tool! https://github.com/bluenote-1577/sylph
+Kraken is where it all began: https://github.com/DerrickWood/kraken2
+Put another spud on the barbie!
+I wouldn't put good money on $EXE\'s prediction
+My gaming PC is sad potato...
+True Irish people eat potatoes three ways at every meal
+Germanic potato salad is one of my favourite foods    
