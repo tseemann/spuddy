@@ -6,6 +6,7 @@ setup () {
   dir=$(dirname "$BATS_TEST_FILENAME")
   cd "$dir"
   exe="$dir/../bin/$name"
+  fasta="JKD6159.fna.gz"
 }
 
 @test "Script syntax check" {
@@ -33,7 +34,19 @@ setup () {
   run $exe -M
   [[ "$output" =~ "potato" ]]
 }
-#@test "Null input" {
-#  run ! $exe /dev/null
-#  [[ "$output" =~ "ERROR" ]]
-#}
+@test "Missing database" {
+  run ! $exe -D does_not_exist $fasta
+  [[ "$output" =~ "ERROR:" ]]
+}
+@test "Incorrectly named database" {
+  run ! $exe -D $exe $fasta
+  [[ "$output" =~ "ERROR:" ]]
+}
+@test "Illegal -p parameter (float)" {
+  run ! $exe -p 3.1415 $fasta
+  [[ "$output" =~ "ERROR:" ]]
+}
+@test "Illegal -c parameter (int)" {
+  run ! $exe -c 0 $fasta
+  [[ "$output" =~ "ERROR:" ]]
+}
