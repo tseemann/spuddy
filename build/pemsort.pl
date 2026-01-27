@@ -5,23 +5,21 @@ use warnings;
 use Getopt::Std;
 use File::Basename;
 use File::Spec;
+#use File::Which;
 use File::Temp qw(tempdir);
 
 my $EXE = basename($0);
 my $VER = '0.2.0';
 
 my %opt = (
-  'j'=>0, 
-  'k'=>3, 
-  'o'=>'', 
-  'f'=>'',
+  'j'=>0, 'k'=>3, 'o'=>'', 'f'=>'', 'S'=>'',
   'T'=>$ENV{'TMPDIR'} // '',
 );
 
 sub msg { say STDERR "@_" unless $opt{'q'} };
 sub err { msg("ERROR:", @_); exit(1); }
 
-getopts('j:k:f:T:o:vhq', \%opt);
+getopts('j:k:f:T:o:vhqsS:', \%opt);
 
 $opt{v} && do { msg("$EXE $VER"); exit(0); };
 $opt{h} and show_help(0);
@@ -32,7 +30,6 @@ my $cpus = cpus();
 is_int($opt{j}, '-j CPUS', 0, $cpus);
 $opt{j} ||= $cpus; # 0 = all CPUs
 my $ram = ram_gb();
-
 
 my @file = @ARGV;
 push @file, read_lines($opt{f}) if $opt{f};
@@ -50,10 +47,20 @@ my $id=0;
 open my $MF, '>', "$TD/Makefile";
 select $MF;
 
-say ".DEFAULT: all";
 say ".PHONY: all";
 say "RM := rm -f";
-say "SORT := sort --merge -T $TD --batch-size=$opt{k}";
+say "SORT := sort $opt{S} --merge -T $TD --batch-size=$opt{k}";
+
+if ($opt{'s'}) {
+  # FIXME
+  # inputs are not already sorted
+  # so we need to sort them first
+  msg("-s | pre-sorng not supported yet");
+}
+
+if ($opt{'z'}) {
+  msg("-z | ompression not supported yet");
+}
 
 my %is_temp;
 
@@ -73,7 +80,7 @@ while (@file > 1) {
 @file==1 or err("Expected only 1 file at end!");
 say "all : @file";
 if ($opt{o}) {
-  say "\tmv -f $< $opt{o}";
+  say "\tmv -f \$< $opt{o}";
 }
 else {
   say "\tcat \$< >&3";
@@ -81,9 +88,11 @@ else {
 }
 close $MF;
 
-system('bash', '-c', "make --silent -j $opt{j} -C $TD all 3>&1 1>&2")==0
+my $mopt = $opt{q} ? '--silent' : '';
+system('bash', '-c', "make $mopt -j $opt{j} -C $TD all 3>&1 1>&2")==0
   or err("Error sorting files: $!");
 
+msg("$TD should be cleaned up now.");
 msg("Sorting compelte.");
 exit(0);
 #.............................................
@@ -134,6 +143,10 @@ OPTIONS
   -k INT   Files to merge per CPU [$opt{k}]
   -f FOFN  FIle of filenames to sort
   -T DIR   Fast temporary directory [$opt{T}]
+  -n       Dry-run - just print steps
+  -z       Use LZ4 for intermeidate files
+  -s       Sort input files first
+  -S STR   Options to pass to Unix 'sort'
 END  
 END_HELP
   exit($exitcode);
