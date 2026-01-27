@@ -31,15 +31,19 @@ is_int($opt{k}, '-k INT', 2, 1024);
 my $cpus = cpus();
 is_int($opt{j}, '-j CPUS', 0, $cpus);
 $opt{j} ||= $cpus; # 0 = all CPUs
+my $ram = ram_gb();
+
 
 my @file = @ARGV;
 push @file, read_lines($opt{f}) if $opt{f};
 @file >= 2 or err("Need at least 2 input files to sort!");
-my @file = map { File::Spec->rel2abs($_) } @file;
+@file = map { File::Spec->rel2abs($_) } @file;
 
+msg("This is $EXE $VER");
+msg("System has $cpus CPUs and $ram GB RAM");
 msg("Have",0+@file,"files to sort.");    
 
-my $TD = tempdir(CLEANUP=>0);
+my $TD = tempdir(CLEANUP=>1);
 msg("Working in: $TD");
 my $id=0;
 
@@ -72,13 +76,16 @@ if ($opt{o}) {
   say "\tmv -f $< $opt{o}";
 }
 else {
-  say "\tcat \$<";
+  say "\tcat \$< >&3";
   say "\t\$(RM) \$<";
 }
 close $MF;
 
-msg("Run: make -j $opt{j} -C $TD");
+system('bash', '-c', "make --silent -j $opt{j} -C $TD all 3>&1 1>&2")==0
+  or err("Error sorting files: $!");
 
+msg("Sorting compelte.");
+exit(0);
 #.............................................
 sub ram_gb {
   my($line) = grep { m/Mem/ } qx"free -wg";
