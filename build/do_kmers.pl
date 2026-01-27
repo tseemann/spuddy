@@ -225,9 +225,9 @@ for my $PC (qw"01 50 75 90 95 99") {
     (   cat $name.final 
       | pv -l -s \$LINES -pec -N $stem
       | awk '\$2 >= 0.${PC}0'
-      | tee $stem
-      | zstd -fc
-      > $stem.zst
+      > $stem
+      && rm -f $stem.zst
+      && zstd --keep $stem
       ) &
   ");
 }
