@@ -11,16 +11,15 @@ srand(42); # same 'shuffle' results each time
 my $CHECK = '-z';  # will always re-calc
 
 #..........................................
-@ARGV or die "$0 KMER STEP MIN LIM";
+@ARGV==3 or die "$0 KMER MIN LIM";
 my $KMER = shift(@ARGV) // 7;
-my $STEP = shift(@ARGV) // 1;
-my $MIN = shift(@ARGV) // 10;
-my $LIM = shift(@ARGV) // 1000;
+my $MIN = shift(@ARGV) // 50;
+my $LIM = shift(@ARGV) // 500;
 
 #..........................................
-say STDERR "Generating: K=$KMER S=$STEP MIN=$MIN LIM=$LIM";
-my $name = "kmers.K$KMER.S$STEP.M$MIN.L$LIM";
-my $suffix = "K$KMER.S$STEP.gz";
+say STDERR "Generating: K=$KMER MIN=$MIN LIM=$LIM";
+my $name = "kmers.K$KMER.M$MIN.L$LIM";
+my $suffix = "${KMER}aa.gz";
 say STDERR "Prefix: $name";
 say STDERR "Suffix: $suffix (for re-usable kmers)";
 
@@ -33,13 +32,8 @@ my $CACHE = "vmtouch -t";
 my $GTDB = "/home/shared/db/gtdb/r226/gtdb_genomes_r226";
 
 my $TAB = "\$'\\t'";
-my $KMSORT = "LC_ALL=C sort --merge --stable"
-            ." --key=1.1,1.$KMER"
-            ." -T \$TEMPDIR";
-my $KMSORT_P = "$KMSORT"
-              ." --buffer-size=\${RAMGB}G"
-              ." --batch-size=32"
-              ." --parallel=\$CPUS";
+my $SORTKEY = "--key=1.1,1.$KMER";
+my $PSORTEM = "psortem -q -S '$SORTKEY' -T \$TEMPDIR";
 my $UNIQ = "LC_ALL=C uniq --check-chars=$KMER";
 my $JOIN = "LC_ALL=C join -t $TAB --nocheck-order";
 # -1 = lines unique to FILE 1
@@ -80,6 +74,7 @@ foreach (path('sp_clusters.tsv')->lines) {
   my($genus,$species) = split ' ', $col[1];
   $genus =~ s/s__//;
   my $gs = "$DIV/$genus/$species";
+  #system("make -j 32 -C $GTDB/$gs");
   if ($genus =~ m/[0-9]/) {
     say STDERR "Skipping: $gs";
     next;
@@ -98,8 +93,7 @@ path("$name.taxa")->spew(\@taxa);
 my $LOGFILE = "$name.sh.log";
 say "rm -f $LOGFILE";
 # The + means append to the log file
-my $PARA = "parallel --bar --joblog +$LOGFILE";
-#my $PARA = "parallel -v --joblog +$LOGFILE";
+my $PARA = "parallel --col-sep $TAB --bar --joblog +$LOGFILE";
 my $PARAJ = "$PARA -j \$CPUS";
 
 #..........................................
@@ -107,15 +101,12 @@ banner("Making folders");
 say "$PARAJ -a $G mkdir -p";
 my @G = sort(path($G)->lines({chomp=>1}));
 
-my @faa;
 my @gcmd;
-#my @kfile;
 for my $g (@G) {
   say STDERR "Prepping: $g";
   my @kmerf;
-  for my $a (shuffle  path("$GTDB/$g/proteomes.txt")->lines({chomp=>1}) ) {
-    push @faa, "$g/$a";
-    push @kmerf, "$a.$suffix";
+  for my $kaa (path("$GTDB/$g/kmers.${KMER}aa.fofn")->lines({chomp=>1}) ) {
+    push @kmerf, "$GTDB/$g/$kaa";
     last if @kmerf >= $LIM; 
   }
 
@@ -127,21 +118,7 @@ for my $g (@G) {
     map { "$_\n" } @kmerf);
 }
 
-my $faa_fofn = path("$name.faa.fofn");
-$faa_fofn->spew(map { "$_\n" } @faa);
-
-#..........................................
-banner("Generating kmers for every isolate");
-say "$PARAJ -a $faa_fofn ".dq(clean("
-    [[ $CHECK '{}.$suffix' ]] ||
-      $ZCAT $GTDB/{}
-    | seqkit sliding -W $KMER -s $STEP
-    | tr '[:lower:]' '[:upper:]' 
-    | grep -v -E '^>|[XUOW*]'
-    | tsvtk uniq -H -o {}.$suffix
-  "));
-
-#..........................................
+ #..........................................
 # count uniq kmers per isolate
 my $gcmd = path("$name.gcmd");
 $gcmd->spew(map { "$_\n" } @gcmd);
@@ -157,8 +134,7 @@ my $NG = scalar(@G)+1;
 say clean("
   [[ $CHECK '$name.kmers' ]] ||
   xargs -a $G -I % echo %/$name 
-  | tr '\\n' '\\0'
-  | $KMSORT_P --files0-from=-
+  | $PSORTEM -j \$CPUS -f /dev/stdin
   | $UNIQ -u
   > $name.kmers
 ");
@@ -205,8 +181,7 @@ banner("Make final databases");
 # the -k is important here to ensure it remians sorted?
 say clean("
   xargs -a $G -I % echo %/$name.anno
-  | tr '\\n' '\\0'
-  | $KMSORT_P --files0-from=-
+  | $PSORTEM -j \$CPUS -f /dev/stdin
   | tee $name.final.bloated
   | tsvtk join -H -f '4;2' - $name.taxa
   | tsvtk cut -H -f1,2,5
@@ -259,7 +234,7 @@ sub species_pepmer {
   return clean("
     [[ $CHECK '$outname' ]] ||
     xargs -a $dir/$name.kmers.fofn 
-          -I % $ZCAT $dir/%
+          -I % $ZCAT %
     | tsvtk freq -H --sort-by-key
     | tsvtk mutate2 -H --at 2
             -w 6 -e '\$2 / $num'
