@@ -1,0 +1,196 @@
+#!/usr/bin/env perl
+use 5.32.0;
+use strict;
+use Data::Dumper;
+use Path::Tiny;
+
+my $exe = path($0)->basename;
+@ARGV >= 3 or die "USAGE: $exe in.tsv out_stem min max regex";
+my $tsv = shift(@ARGV) // 'both.tsv';
+my $stem = shift(@ARGV) // 'STUPID';
+my $min = shift(@ARGV) // '1';
+my $max = shift(@ARGV) // '9999999';
+my $regex = shift(@ARGV) // 'a'; # will match all
+
+say STDERR "tsv=$tsv stem=$stem min=$min max=$max";
+$stem or die "bad stem";
+
+my $ZIP = 'dataset.zip';
+my $MAKEFILE = do { local $/; <DATA> };
+$MAKEFILE =~ s/~~\h*/\t/gm;
+
+my @COLS = qw(
+  gtdb_genome_representative
+  ncbi_genbank_assembly_accession
+  gtdb_taxonomy
+);
+my $COLS = join ',', @COLS;
+
+my %sp;
+my %rep;
+print STDERR "Loading: @COLS\n";
+open TSV, '-|', "csvtk -U -t cut -f $COLS '$tsv'";
+while (<TSV>) {
+  chomp;
+  my($group,$acc,$taxon) = split m/\t/;
+  push $sp{$taxon}->@*, $acc;
+  $rep{$acc} = $group;
+}
+close TSV;
+print STDERR "Read ", scalar(keys %sp), " rows\n";
+#print Dumper(\%sp);
+
+my %group;
+my @samples;
+my $groups = 0;
+for my $taxon (sort keys %sp) {
+  my $N = scalar $sp{$taxon}->@*;
+  ### DEBUG
+  #next unless $taxon =~ m/cuprina/;
+  ### END 
+  next unless $N >= $min;
+  next unless $N <= $max;
+  $groups++;
+  my $dir = to_folder($taxon);
+  # Filter
+  next unless $dir =~ m/$regex/;
+  print STDERR "Making #$groups: $dir\n";
+  my $p = path($dir) or die $!;
+  $p->mkpath unless $p->is_dir;
+
+  my $a = $p->child("accessions.txt");
+  say STDERR "Writing: $a [$N]", 
+  $a->spew_raw(map { $_."\n" } $sp{$taxon}->@*);
+  system("touch -d '1 month ago' $a")==0 or die $!;
+  
+  my $mf = $p->child("Makefile");
+  say STDERR "Writing: $mf", 
+  $mf->spew_raw($MAKEFILE);
+  
+  push @samples, map {
+    join("\t", $_,
+               "$p/$_.fna",
+               $rep{$_},
+               $N,
+               $taxon)."\n"
+  } $sp{$taxon}->@*;
+  
+  $group{$p}++;
+}
+print STDERR "Prepared $groups folders\n";
+
+print STDERR "Writing $stem.sh\n";
+path("$stem.sh")->spew_raw(
+  map { "make \${O:-} -C $_ \${T:-}\n" } sort keys %group
+);
+
+print STDERR "Writing $stem.tsv\n";
+path("$stem.tsv")->spew_raw( \@samples );
+
+# d__Bacteria;p__Bacillota;c__Bacilli;
+# o__Staphylococcales;f__Staphylococcaceae;
+# g__Staphylococcus;s__Staphylococcus argenteus
+sub to_folder {
+  my($t) = @_;
+  my @t = split m';', $t;
+  $t[-1] =~ s/^s__\S+\s+/s__/;
+  my @d = grep m/^[dgs]__/, @t;
+  @d = map { s/^.__//; $_ } @d;
+  return join '/', @d;
+}
+
+# ncbi_dataset/data/GCA_000236925.1/GCA_000236925.1_ASM23692v1_genomic.fna
+
+__DATA__
+
+MAKEFLAGS += --no-builtin-rules
+MAKEFLAGS += --no-builtin-variables
+
+.SUFFIXES:
+.DELETE_ON_ERROR:
+.SECONDARY:
+.DEFAULT: all
+.PHONY: all clean
+.PRECIOUS: dataset.zip
+
+SHELL := bash
+LC_ALL := C
+export LC_ALL
+GZIP := libdeflate-gzip
+RM := rm -f
+
+CODE := 11
+KMER := 8
+
+ZIPDIR := ncbi_dataset
+ACCS_FILE := accessions.txt
+ACCS := $(file < $(ACCS_FILE))
+
+[Aall : genomes.fofn proteomes.fofn kmers.$(KMER)aa.fofn
+
+kmers.$(KMER)aa.fofn : kmers.$(KMER)aa.fofn.tmp blacklist.txt
+~~grep -vF -f blacklist.txt $< > $@
+
+kmers.$(KMER)aa.fofn.tmp : $(ACCS:%=%.$(KMER)aa.gz)
+~~@$(file >$@) $(foreach f,$^,$(file >>$@,$f))
+
+proteomes.fofn : proteomes.fofn.tmp blacklist.txt
+~~grep -vF -f blacklist.txt $< > $@
+
+proteomes.fofn.tmp : $(ACCS:%=%.faa.gz)
+~~@$(file >$@) $(foreach f,$^,$(file >>$@,$f))
+
+%.$(KMER)aa.gz : %.faa.gz 
+~~if [ -s $< ]; then \
+seqkit sliding -w 0 -W $(KMER) -s 1 $< \
+| grep -Ev '^>|[*XUOWa-z]' \
+| tsvtk uniq -H \
+| LC_ALL=C sort \
+| $(GZIP) -12 -c > $@ \
+; else touch $@ ; fi
+
+%.faa.gz : %.fna
+~~if [ -s $< ]; then \
+pyrodigal -g $(CODE) -c -p single \
+  -i $< -o /dev/null -a /dev/stdout \
+| tantan -p \
+| seqkit seq -w 0 \
+| $(GZIP) -12 -c > $@ \
+; else touch $@ ; fi
+
+genomes.fofn : genomes.fofn.tmp blacklist.txt
+~~grep -vF -f blacklist.txt $< > $@
+~~$(RM) -r $(ZIPDIR)
+
+blacklist.txt :genomes.fofn.tmp
+~~find . -type f -empty \
+-exec basename {} .fna \; > $@
+
+genomes.fofn.tmp : $(ACCS:%=%.fna)
+~~@$(file > $@) $(foreach f,$^,$(file >>$@,$f))
+
+%.fna : md5sum.txt
+~~-mv -f $(ZIPDIR)/data/$(*)/$(*)*.fna $@
+~~touch $@
+
+md5sum.txt : dataset.zip
+~~unzip -q -D -X -o $<
+~~#unzip -Z -1 $< | xargs touch
+~~touch -r $< $@
+~~-$(RM) README.md
+
+dataset.zip : $(ACCS_FILE)
+~~datasets download genome accession \
+~~--include genome \
+~~--inputfile $< \
+~~--filename $@
+
+clean :
+~~-$(RM) *.fna *.faa.gz *.?aa.gz md5sum.txt make.log
+~~$(RM) genomes.fofn proteomes.fofn *.$(KMER)aa.fofn
+~~$(RM) genomes.txt proteomes.txt
+~~-$(RM) -r $(ZIPDIR) 
+
+pure : clean
+~~-$(RM) dataset.zip
+
