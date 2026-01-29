@@ -12,16 +12,16 @@ use FindBin;
 binmode(STDERR, ":utf8"); # for UTF-8 emoji
 
 #......................................................................................
-my $VERSION = "0.6.1";
+my $VERSION = "0.7.0";
 my $EXE = path($0)->basename;
 my $URL = 'https://github.com/tseemann/spuddy';
 my $ICON = "\x{1F954}"; # potato
+my $DBDIR= "$FindBin::RealBin/../db/";
 
 my %opt = (
-#  'D' => 'kmers.7.1.50.db.95pc',
-  'D' => 'kmers.K8.S1.M50.L50.db.99pc.zst',
+  'D' => $DBDIR,
+  'd' => 'kmers.K7.S1.M50.L50.db.90pc.zst',
   'c' => 11,
-#  'L' => 'auto',
   'K' => '/dev/null',
   'O' => '/dev/null',
   'o' => '/dev/stdout',
@@ -35,33 +35,36 @@ sub usage {
   my($errcode) = @_;
   $errcode ||= 0;
   my $ofh = $errcode ? \*STDERR : \*STDOUT;
-  print $ofh 
-    "NAME\n  $EXE $VERSION - bacterial species prediction\n",
-    "USAGE\n  $EXE [opts] file.{fasta,fastq}[.gz]\n",
-    "OPTIONS\n",
-    "  -h       Print this help\n",
-    "  -v       Print version and exit\n",
-    "  -C       Show citation and exit\n",
-    "  -q       No output while running, only errors\n",
-    "  -d       Output debug information\n",
-    "  -f FOFN  Input file of filenames\n",
-    "SETTINGS\n",
-    "  -D FILE  Database file [$opt{D}]\n",
-    "  -c CODE  Genetic code [$opt{c}]\n",
-#    "  -L LEN   Minimum protein length [$opt{L}]\n",
-    "  -m       Metagenome mode\n",
-    "OUTPUTS\n",
-    "  -1       Just prin the prediction!\n",
-    "  -t n.nn  Threshold for reporting [$opt{t}]\n",
-    "  -o FILE  Species prediction result [$opt{o}]\n",
-    "  -O FILE  Save raw result file [$opt{O}]\n",
-    "  -K FILE  Save kmers to this file [$opt{K}]\n",
-    "SPEED\n",
-    "  -p PROP  Sample this proportion of input [$opt{p}]\n",
-    "  -j CPUS  Threads to use [$opt{j}]\n",
-    "  -R RAM   Keep RAM usage below [$opt{R}] GB\n",
-    "HOMEPAGE\n  $URL\n",
-    "END\n";
+  print $ofh <<"END_HELP";
+NAME
+  $EXE $VERSION - bacterial species prediction
+USAGE
+  $EXE [opts] file.{fasta,fastq}[.gz]
+OPTIONS
+  -h       Print this help
+  -v       Print version and exit
+  -C       Show citation and exit
+  -q       No output while running, only errors
+  -f FOFN  Input file of filenames
+SETTINGS
+  -D DIR   Databases folder [$opt{D}]
+  -d FILE  Database file [$opt{d}]
+  -c CODE  Genetic code [$opt{c}]
+  -m       Metagenome mode
+OUTPUTS
+  -1       Just prin the prediction!
+  -t n.nn  Threshold for reporting [$opt{t}]
+  -o FILE  Species prediction result [$opt{o}]
+  -O FILE  Save raw result file [$opt{O}]
+  -K FILE  Save kmers to this file [$opt{K}]
+SPEED
+  -p PROP  Sample this proportion of input [$opt{p}]
+  -j CPUS  Threads to use [$opt{j}]
+  -R RAM   Keep RAM usage below [$opt{R}] GB
+HOMEPAGE
+  $URL
+END
+END_HELP
   exit($errcode);
 }
 #......................................................................................
@@ -69,7 +72,7 @@ sub msg { print STDERR "$ICON @_\n" unless $opt{'q'}; }
 sub wrn { msg("WARNING:", @_); }
 sub err { print STDERR "ERROR: @_\n"; exit(-1); }
 #......................................................................................
-getopts('vhqCdmM1c:f:D:L:K:j:R:O:o:p:t:', \%opt) or exit(-1);
+getopts('vhqCmM1c:f:d:D:L:K:j:R:O:o:p:t:', \%opt) or exit(-1);
 
 $opt{'v'} and version();
 $opt{'C'} and citation();
@@ -81,7 +84,7 @@ $opt{'M'} and motd(42);
 is_int($opt{'c'}, "Genetic code -c", 1, 33);
 is_int($opt{'L'}, "Min ORF length -L", 30, 999);
 is_int($opt{'R'}, "RAM -R", 1, 4096); # need ram()
-is_file($opt{'D'}, "database -D");
+is_file($opt{'d'}, "database -d");
 is_float($opt{'p'}, "proportaion -p", 0, 1);
 is_float($opt{'t'}, "threshold -t", 0, 1);
 is_file($opt{'f'}, "FOFN -f") if $opt{'f'};
@@ -99,7 +102,7 @@ is_int($opt{j}, '-j CPUs', 1, $cpus);
 msg("Will use $cpus threads and $opt{R} GB RAM");
 
 # guess kmer size from DB name
-$opt{'D'} =~ m/(\d+)/;
+$opt{'d'} =~ m/(\d+)/;
 my $KMER = $1 or err("Can not determine database k-mer size");
 
 # find the taxa table
@@ -141,7 +144,7 @@ my $outfile = Path::Tiny->tempfile();
 my $est_lines = int( $ss->{'sum_len'} );
 my $pv_seq = $opt{'q'} ? ''  : "| $PV -N kmers -l -s $est_lines";
    
-my $dbsize = uncompressed_size($opt{'D'});
+my $dbsize = uncompressed_size($opt{'d'});
 msg(sprintf "Database is %d MB", $dbsize/1E6 );
 my $pv_db = $opt{'q'} ? '' : "| $PV -N '$ICON Scanning' -s $dbsize";
 
@@ -163,13 +166,13 @@ my $cmd = "
  $metag
  | tee \Q$opt{K}\E
  | LC_ALL=C join -t \$'\\t' -j 1 
-            - <(zstd -dcf $opt{D} $pv_db)
+            - <(zstd -dcf $opt{d} $pv_db)
  > $outfile
 ";
 $cmd =~ s/\s+/ /xmsg;
 msg("Running: $cmd") if $opt{'d'};
 msg("Translating ORFs and making $KMER-mers...");
-#msg("Scanning $infile against $opt{D}");
+#msg("Scanning $infile against $opt{d}");
 system('bash', '-c', $cmd)==0 or err($!);
 $outfile->copy($opt{'O'});
 
@@ -208,7 +211,7 @@ exit(0);
 
 #......................................................................................
 sub load_taxa {
-  my $taxa_fn = $opt{'D'};
+  my $taxa_fn = $opt{'d'};
   $taxa_fn =~ s/\.db.*$/.taxa/;
   is_file($taxa_fn, "Taxa file");
   my $species_of = {
@@ -225,7 +228,6 @@ sub seq_stats {
   msg("Assessing input file: $fname");
   my @line = qx"seqkit head -l $max \Q$fname\E | seqkit stats --quiet -T | tsvtk transpose -H -t";
   my $ss = { map { chomp; split m/\t/ } @line };
-  say STDERR Dumper($ss) if $opt{d};
   return $ss;
 }
 #......................................................................................
